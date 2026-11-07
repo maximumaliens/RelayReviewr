@@ -130,7 +130,7 @@ def stop():
 
     for old in db.execute("SELECT id FROM handoffs WHERE session_id=? AND status IN (%s)"
                           % ",".join("?" * len(store.WAITING)), (sid, *store.WAITING)).fetchall():
-        store.set_handoff(db, old["id"], "superseded", "newer turn from the same session")
+        store.set_handoff(db, old["id"], "superseded", "newer turn from the same session", only_from=store.WAITING)
     hid = file_handoff(db, sid, link, message, payload["transcript_path"], payload.get("cwd") or link["cwd"])
     h = store.handoff(db, hid)
     try:
@@ -148,7 +148,7 @@ def stop():
         if handover:
             intake.mark_handover_sent(db, thread_id, handover["sha256"])
     except (OSError, codexrpc.CodexError) as e:
-        store.set_handoff(db, hid, "failed", f"could not start the Codex assessment: {e}")
+        store.set_handoff(db, hid, "failed", f"could not start the Codex assessment: {e}", only_from=("queued",))
         notify(db, f"{store.about(db, h)}: assessment failed", f"{e} — Claude was released; nothing was sent.", hid)
         return 0
     store.set_handoff(db, hid, "assessing", only_from=("queued",))
@@ -247,9 +247,12 @@ def session_end():
     except (json.JSONDecodeError, KeyError, TypeError):
         return 0
     db.execute("INSERT OR REPLACE INTO sessions (session_id, ended) VALUES (?, ?)", (sid, store.now()))
-    for h in db.execute("SELECT * FROM handoffs WHERE session_id=? AND status IN (%s, 'released', 'timed_out')"
-                        % ",".join("?" * len(store.WAITING)), (sid, *store.WAITING)).fetchall():
-        store.set_handoff(db, h["id"], "session_ended", "the originating Claude session ended")
+    open_states = store.WAITING + ("released", "timed_out")
+    for h in db.execute("SELECT * FROM handoffs WHERE session_id=? AND status IN (%s)"
+                        % ",".join("?" * len(open_states)), (sid, *open_states)).fetchall():
+        if not store.set_handoff(db, h["id"], "session_ended", "the originating Claude session ended",
+                                 only_from=open_states):
+            continue  # another process settled it first (e.g. a send confirmed): "not sent" would be untrue
         told = False
         if h["thread_id"]:
             try:
