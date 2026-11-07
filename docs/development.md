@@ -4,7 +4,7 @@ How to change the relay and check it. For using it, see the [README](../README.m
 
 ## Where to work
 
-Develop and test in a separate checkout or worktree (e.g. `~/tools/cc-codex-relay-dev`), never in the installed checkout that your own Claude hooks run. Run its relay by path (`<worktree>/bin/relay`), never through the `relay` on `PATH`.
+Develop and test in a separate checkout or worktree (e.g. `~/tools/RelayReviewr-dev`), never in the installed checkout that your own Claude hooks run. Run its relay by path (`<worktree>/bin/relay`), never through the `relay` on `PATH`.
 
 Take care with your own Claude sessions while you develop: a session linked to the installed relay writes to the installed store every time a turn ends.
 
@@ -48,3 +48,18 @@ This repository is public. Before you commit:
 - **Don't commit acceptance evidence.** `results/` is ignored because transcripts can quote your persona, paths and sessions. Summarise results instead.
 - **Commit times show your time zone.** To hide it, commit with `TZ=UTC git commit …`.
 - **Check before pushing:** run `gitleaks git .` for secrets, and the unit tests with `RELAY_PRIVATE_NAMES` set to your own names.
+
+## Releasing
+
+Work happens on `dev`. `main` only moves through a reviewed pull request, and every release is a tag on `main`.
+
+1. **Push `dev`:** `git push origin dev`. CI runs the unit tests.
+2. **Open a pull request from `dev` to `main`:** `gh pr create --base main --head dev --fill`. Merge it once the tests check passes.
+3. **Release from `main`:** `gh release create vX.Y.Z --target main --prerelease --generate-notes --title "vX.Y.Z"`. This creates the tag on `main` and writes the notes from the merged pull requests. Drop `--prerelease` from 1.0.0 on.
+4. **Bring `dev` level with `main`:** `git pull origin main` in the `dev` checkout, so the merge commit doesn't show up as a difference next time.
+5. **Update your installed relay** when no session is held: `git pull` in the installed checkout, then `bin/relay install-claude`. Re-running `install-claude` is always safe; it only changes anything when the commands or hooks have changed. A held session's hook keeps running the code it started with (DESIGN.md, *Upgrading while sessions are held*).
+
+**Version numbers** follow `MAJOR.MINOR.PATCH`:
+- **Patch** (`0.1.1`): fixes and tests, with no change users would notice beyond the fix.
+- **Minor** (`0.2.0`): new or changed behaviour, such as a new menu option or command.
+- **Major** (`1.0.0`, then `2.0.0`): the first stable release, then any change that breaks an existing setup, such as a config format users must edit.
