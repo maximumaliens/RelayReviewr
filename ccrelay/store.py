@@ -79,6 +79,10 @@ CREATE TABLE IF NOT EXISTS menus_open (
     pid INTEGER NOT NULL,
     opened REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS no_reply_marks (
+    handoff_id INTEGER PRIMARY KEY REFERENCES handoffs(id),
+    created REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
     ended REAL
@@ -297,6 +301,35 @@ def delivered(db, did, recipient_hid, reason=None):
         set_draft(db, row["id"], "closed", f"not sent: the session received D{did} instead",
                   only_from=("ready", "failed"))
     return True
+
+
+def no_reply(db, hid):
+    """Whether Codex assessed hand-off `hid` as needing no reply. The marker applies only while the hand-off has
+    no draft: a draft saved later supersedes it, and nothing needs clearing."""
+    return db.execute("SELECT 1 FROM no_reply_marks WHERE handoff_id=?", (hid,)).fetchone() is not None
+
+
+def mark_no_reply(db, hid):
+    """Record that Codex assessed hand-off `hid` as needing no reply: the marker and the move to review_ready
+    (only from assessing or no_draft, as a saved draft does) are written together. Refused, writing nothing,
+    for a hand-off that isn't being assessed or already has a draft, so it can't revive a stopped hand-off
+    or hide a draft. True only when the marker is new."""
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        h = handoff(db, hid)
+        if h["status"] not in ("assessing", "no_draft") or latest_draft(db, hid):
+            db.execute("ROLLBACK")
+            return False
+        new = db.execute("INSERT OR IGNORE INTO no_reply_marks (handoff_id, created) VALUES (?, ?)",
+                         (hid, now())).rowcount == 1
+        if new:
+            event(db, "no_reply:assessed", "Codex assessed that Claude needs no reply", hid)
+        set_handoff(db, hid, "review_ready", only_from=("assessing", "no_draft"))
+        db.execute("COMMIT")
+        return new
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
 
 
 def menu_opened(db, thread_id, hid):
