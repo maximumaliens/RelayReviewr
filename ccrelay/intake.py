@@ -118,7 +118,9 @@ def handoff_text(h, handover=None, last=None):
         where += f"Last instruction delivered: D{last[0]}, source {store.session_name(last[1])} H{last[1]['id']}\n"
     return (
         f"[cc-codex-relay handoff H{h['id']} · ticket {h['label']}{sender} · Claude session {h['session_id'][:8]} · {stamp}]\n"
-        "Reviewer instructions apply: assess this, then call propose_reply with the exact prompt to send back, "
+        "Reviewer instructions apply: assess this, then call propose_reply with either the exact prompt to send back "
+        "(draft) or a copy of this report made by the relay (copy, optionally with your additions), never both; "
+        "the sessions are isolated, so the delivered text must stand alone, "
         f"passing handoff \"H{h['id']}\".\n"
         f"{where}\n"
         f"{handover_block(handover)}"
