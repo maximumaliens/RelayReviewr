@@ -61,6 +61,17 @@ CREATE TABLE IF NOT EXISTS drafts (
     created REAL NOT NULL,
     updated REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS draft_parts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    draft_id INTEGER NOT NULL REFERENCES drafts(id),
+    seq INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    source_handoff_id INTEGER,
+    start_char INTEGER NOT NULL,
+    end_char INTEGER NOT NULL,
+    from_line INTEGER,
+    to_line INTEGER
+);
 CREATE TABLE IF NOT EXISTS menus_open (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     thread_id TEXT NOT NULL,
@@ -105,6 +116,7 @@ def load_config():
     cfg.setdefault("hook_wait_secs", 14340)
     cfg.setdefault("menu_inline_lines", 40)
     cfg.setdefault("menu_inline_chars", 3000)
+    cfg.setdefault("menu_additions_chars", 1500)
     cfg.setdefault("send_pickup_secs", 15)
     cfg.setdefault("personas", {})
     return cfg

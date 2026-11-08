@@ -112,12 +112,12 @@ class RelayCase(unittest.TestCase):
         return repo
 
     def handoff(self, label="T-1", thread="thread-1", status="review_ready", session="abcdef0123456789",
-                cwd=None, hook_pid=None, transcript=None):
+                cwd=None, hook_pid=None, transcript=None, report="report"):
         t = store.now()
         return self.db.execute(
             "INSERT INTO handoffs (session_id, label, thread_id, cwd, transcript_path, claude_message, status,"
-            " hook_pid, recipient_aware, created, updated) VALUES (?, ?, ?, ?, ?, 'report', ?, ?, 1, ?, ?)",
-            (session, label, thread, str(cwd or self.root), str(transcript or self.root / "t.jsonl"), status,
+            " hook_pid, recipient_aware, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+            (session, label, thread, str(cwd or self.root), str(transcript or self.root / "t.jsonl"), report, status,
              hook_pid or os.getpid(), t, t)).lastrowid
 
     def draft(self, hid, text="do the thing", status="ready"):

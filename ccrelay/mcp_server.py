@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 
-from . import claude_hooks, codexrpc, store
+from . import claude_hooks, codexrpc, draft_copy, store
 from .notify import notify
 
 DISCUSS, KEEP, FINISH = "Discuss", "Keep waiting", "Finish without sending"
@@ -27,13 +27,40 @@ HANDOFF_PROP = {"type": "string", "description": "The handoff your draft answers
 TOOLS = [
     {"name": "propose_reply",
      "description": "Save your drafted return prompt for Claude and show the user the review menu. "
-                    "Call after every assessment and after each revision. Returns the user's choice.",
+                    "Call after every assessment and after each revision. Returns the user's choice. "
+                    "Give EITHER `draft` (free text, sent exactly as you write it) OR `copy` (the relay copies "
+                    "the stored report named by `handoff` itself, so nothing is retyped), optionally followed by "
+                    "your `additions`; never `draft` together with `copy` or `additions`. "
+                    "The sessions are isolated: the recipient has seen none of your discussion and none of the "
+                    "other session's reports, so the delivered text must stand alone, naming the exact files and "
+                    "commands, and must not depend on H or D identifiers. "
+                    "To pass a builder's closeout to a verifier, use copy \"all\" and put any material "
+                    "correction or concern under \"Reviewer notes\" in `additions`; with nothing to add, copy "
+                    "alone. To send a verifier's findings to a builder, copy only the accepted builder-directed "
+                    "instructions (leave out commentary and rejected or superseded instructions) and put your "
+                    "amendments in `additions`, with no conflicting requirements.",
      "inputSchema": {"type": "object", "properties": {
-         "draft": {"type": "string", "description": "The exact, complete prompt to send to Claude."},
+         "draft": {"type": "string", "description": "Free text: the exact, complete prompt to send to Claude. "
+                                                    "Not together with copy or additions."},
+         "copy": {"anyOf": [{"type": "string", "enum": ["all"]},
+                            {"type": "array", "items": {"type": "object", "properties": {
+                                "from": {"type": "string", "description": "Text of the first line to copy "
+                                                                          "(whitespace at both ends ignored)."},
+                                "to": {"type": "string", "description": "Text of the last line to copy, matched "
+                                                                        "at or after the first."},
+                                "from_line": {"type": "integer", "description": "Line number, only to resolve a "
+                                                                                "repeated `from`, as the relay lists."},
+                                "to_line": {"type": "integer", "description": "Line number, only to resolve a "
+                                                                              "repeated `to`, as the relay lists."}},
+                                "required": ["from", "to"]}}],
+                  "description": "Instead of draft: \"all\" copies the whole stored report; or a list of ascending, "
+                                 "non-overlapping {from, to} line selections. The relay copies the text exactly."},
+         "additions": {"type": "string", "description": "Only with copy: your own text placed after the copied "
+                                                        "text, e.g. \"Reviewer notes\" or \"Amendments\"."},
          "handoff": HANDOFF_PROP,
          "recipient": {"type": "string", "description": "Optional: the session you suggest should receive "
                                                         "the draft. Shown to the user as text only."}},
-         "required": ["draft", "handoff"]}},
+         "required": ["handoff"]}},
     {"name": "show_menu",
      "description": "Show the user the review menu again for the draft on one handoff. Returns the user's choice.",
      "inputSchema": {"type": "object", "properties": {"handoff": HANDOFF_PROP}, "required": ["handoff"]}},
@@ -158,7 +185,18 @@ def tool(server, name, args, thread_id):
 
 def menu_call(server, db, cfg, name, args, h):
     if name == "propose_reply":
-        draft = args.get("draft")
+        draft, copy, additions = (args.get(k) for k in ("draft", "copy", "additions"))  # null = left out
+        parts = None
+        if draft is not None and (copy is not None or additions is not None):
+            return ("Rejected: give either draft (free text) or copy with optional additions, not both. "
+                    "Nothing was saved or shown.")
+        if copy is None and additions is not None:
+            return "Rejected: additions only go with copy. Nothing was saved or shown."
+        if copy is not None:
+            try:
+                draft, parts = draft_copy.assemble(h["claude_message"], copy, additions)
+            except draft_copy.CopyError as e:
+                return str(e)
         if not isinstance(draft, str) or not draft.strip():
             return "Relay error: propose_reply needs a non-empty draft."
         recipient = args.get("recipient")
@@ -166,11 +204,11 @@ def menu_call(server, db, cfg, name, args, h):
         if h["status"] == "sent":
             return (f"Not saved: handoff H{h['id']} is already {h['status']}. "
                     "Wait for Claude's next output before drafting.")
-        save_draft(db, cfg, h, draft, recipient)
+        save_draft(db, cfg, h, draft, recipient, parts)
     return menu(server, db, cfg, h["id"])
 
 
-def save_draft(db, cfg, h, text, recipient=None):
+def save_draft(db, cfg, h, text, recipient=None, parts=None):
     first = store.latest_draft(db, h["id"]) is None
     db.execute("UPDATE drafts SET status='replaced', updated=? WHERE handoff_id=? AND status IN ('ready','failed')",
                (store.now(), h["id"]))
@@ -180,8 +218,13 @@ def save_draft(db, cfg, h, text, recipient=None):
     did = db.execute("INSERT INTO drafts (handoff_id, text, path, status, suggested_recipient, created, updated)"
                      " VALUES (?, ?, '', 'ready', ?, ?, ?)", (h["id"], text, recipient, t, t)).lastrowid
     path = drafts_dir / f"{safe(h['label'])}-H{h['id']}-D{did}.md"
-    path.write_text(text)
+    path.write_bytes(text.encode("utf-8"))  # raw bytes: no locale encoding, no newline translation
     db.execute("UPDATE drafts SET path=? WHERE id=?", (str(path), did))
+    for seq, part in enumerate(parts or []):
+        db.execute("INSERT INTO draft_parts (draft_id, seq, kind, source_handoff_id, start_char, end_char, from_line,"
+                   " to_line) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                   (did, seq, part["kind"], h["id"] if part["kind"] == "copied" else None, part["start"], part["end"],
+                    part.get("from_line"), part.get("to_line")))
     store.event(db, "draft:ready", f"D{did}", h["id"])
     store.set_handoff(db, h["id"], "review_ready", only_from=("assessing", "no_draft"))
     if first:
@@ -284,7 +327,8 @@ def menu(server, db, cfg, hid, gone=None):
     waiting_reports = [f"H{q['id']} from {store.session_name(q)}" for q in reports_queued(db, cfg, h)]
     if waiting_reports:
         state_line = "\n".join(p for p in (state_line, "Reports waiting for assessment: " + ", ".join(waiting_reports)) if p)
-    message = menu_message(cfg, h, d, state_line, destinations)
+    parts = draft_parts(db, d)
+    message = menu_message(cfg, h, d, state_line, destinations, parts, provenance_line(db, parts) if parts else None)
     if gone:  # why nothing was sent comes first
         message = not_sent_line(gone, names[gone["id"]]) + "\n" + message
     answer = server.elicit(message, choices, abort=source_stopped)
@@ -380,21 +424,68 @@ def unique_names(hs):
     return names
 
 
-def menu_message(cfg, h, d, state_line, destinations=()):
+def draft_parts(db, d):
+    """The parts a copied draft was assembled from, in order; none for a free-text draft."""
+    return db.execute("SELECT * FROM draft_parts WHERE draft_id=? ORDER BY seq", (d["id"],)).fetchall()
+
+
+def provenance_line(db, parts):
+    """Metadata for the menu, never part of the delivered text: which lines were copied from which report and
+    session, and how large the reviewer's additions are."""
+    copied = [p for p in parts if p["kind"] == "copied"]
+    source = store.handoff(db, copied[0]["source_handoff_id"])
+    ranges = [f"{p['from_line']}-{p['to_line']}" if p["to_line"] != p["from_line"] else str(p["from_line"])
+              for p in copied]
+    noun = "line" if len(copied) == 1 and copied[0]["from_line"] == copied[0]["to_line"] else "lines"
+    spans = ranges[0] if len(ranges) == 1 else ", ".join(ranges[:-1]) + " and " + ranges[-1]
+    added = sum(p["end_char"] - p["start_char"] for p in parts if p["kind"] == "additions")
+    return (f"Copied from report H{source['id']} ({store.session_name(source)}, Claude session "
+            f"{source['session_id'][:8]}): {noun} {spans}; reviewer's additions: {added} characters.")
+
+
+def preview(cfg, d, parts):
+    """A long copied draft as a marked preview: the start of the copied text, then the reviewer's additions up
+    to a cap. Everything shortened says so."""
+    text = d["text"]
+    adds = [p for p in parts if p["kind"] == "additions"]
+    copied = text[:max(p["end_char"] for p in parts if p["kind"] == "copied")]
+    lines = copied.splitlines()
+    shown = "\n".join(lines[:15])
+    cap = cfg["menu_inline_chars"]
+    out = [shown[:cap]]
+    if len(shown) > cap:
+        out.append(f"… (copied part shortened: showing the first {cap} of {len(copied)} characters)")
+    elif len(lines) > 15:
+        out.append(f"… (copied part shortened: showing the first 15 of {len(lines)} lines, {len(copied)} characters)")
+    if adds:
+        extra = text[adds[0]["start_char"]:adds[0]["end_char"]]
+        cap = cfg["menu_additions_chars"]
+        out += ["", "Reviewer's additions:", extra[:cap]]
+        if len(extra) > cap:
+            out.append(f"… (additions shortened: showing the first {cap} of {len(extra)} characters)")
+    return "\n".join(out)
+
+
+def menu_message(cfg, h, d, state_line, destinations=(), parts=(), provenance=None):
     lines = d["text"].splitlines()
-    if len(lines) <= cfg["menu_inline_lines"] and len(d["text"]) <= cfg["menu_inline_chars"]:
+    shortened = not (len(lines) <= cfg["menu_inline_lines"] and len(d["text"]) <= cfg["menu_inline_chars"])
+    label = "Draft (sent exactly as stored):"
+    if not shortened:
         body = d["text"]
+    elif parts:
+        body = preview(cfg, d, parts)
+        label = "Draft (shortened preview; the exact draft is sent as stored in the file below):"
     else:
         body = "\n".join(lines[:15]) + f"\n… ({len(lines)} lines, {len(d['text'])} characters)"
-    parts = [f"Answering report H{h['id']} · ticket {h['label']} · draft D{d['id']} · Claude session {h['session_id'][:8]}"]
+    parts_line = [provenance] if provenance else []
+    head = [f"Answering report H{h['id']} · ticket {h['label']} · draft D{d['id']} · Claude session {h['session_id'][:8]}"]
     if d["suggested_recipient"]:
-        parts.append(f"Reviewer suggests sending to: {d['suggested_recipient']} (a suggestion only)")
+        head.append(f"Reviewer suggests sending to: {d['suggested_recipient']} (a suggestion only)")
     if state_line:
-        parts.append(state_line)
+        head.append(state_line)
     if destinations:
-        parts += ["", "Sessions on this ticket:", *destinations]
-    parts += ["", "Draft (sent exactly as stored):", body, "", f"Exact file: {d['path']}"]
-    return "\n".join(parts)
+        head += ["", "Sessions on this ticket:", *destinations]
+    return "\n".join(head + parts_line + ["", label, body, "", f"Exact file: {d['path']}"])
 
 
 def send(db, cfg, h, d, r, names):
