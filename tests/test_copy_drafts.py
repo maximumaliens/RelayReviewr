@@ -210,6 +210,16 @@ class MenuProvenance(CopyCase):
         self.assertIn(f"Exact file: {d['path']}", message)
         self.assertEqual(pathlib.Path(d["path"]).read_bytes(), d["text"].encode("utf-8"))
 
+    def test_the_copied_part_of_a_preview_is_capped_in_characters_too(self):
+        report = "".join(f"{i} " + "w" * 2000 + "\n" for i in range(1, 21))
+        hid = self.held(report=report)
+        srv, _ = self.propose(hid, {"copy": "all"})
+        message = srv.forms[0]["message"]
+        self.assertIn("shortened preview", message)
+        self.assertLess(len(message), 5000)
+        self.assertIn(f"copied part shortened: showing the first 3000 of {len(report)} characters", message)
+        self.assertEqual(self.draft_row(hid)["text"], report)
+
     def test_a_long_plain_draft_keeps_its_old_preview(self):
         hid = self.held()
         text = "".join(f"line {i}\n" for i in range(1, 61))

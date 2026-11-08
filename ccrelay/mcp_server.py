@@ -451,8 +451,11 @@ def preview(cfg, d, parts):
     copied = text[:max(p["end_char"] for p in parts if p["kind"] == "copied")]
     lines = copied.splitlines()
     shown = "\n".join(lines[:15])
-    out = [shown]
-    if len(lines) > 15:
+    cap = cfg["menu_inline_chars"]
+    out = [shown[:cap]]
+    if len(shown) > cap:
+        out.append(f"… (copied part shortened: showing the first {cap} of {len(copied)} characters)")
+    elif len(lines) > 15:
         out.append(f"… (copied part shortened: showing the first 15 of {len(lines)} lines, {len(copied)} characters)")
     if adds:
         extra = text[adds[0]["start_char"]:adds[0]["end_char"]]
