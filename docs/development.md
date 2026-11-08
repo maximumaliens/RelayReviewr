@@ -53,11 +53,16 @@ This repository is public. Before you commit:
 
 Work happens on `dev`. `main` only moves through a reviewed pull request, and every release is a tag on `main`.
 
+**Keep `CHANGELOG.md` current.** Every completed ticket and every ad-hoc fix adds a line under `## Unreleased` in `CHANGELOG.md`, in the same change as the work. Group lines under Added, Changed, Fixed or Known limitations, and name the issue number where there is one.
+
 1. **Push `dev`:** `git push origin dev`. CI runs the unit tests.
-2. **Open a pull request from `dev` to `main`:** `gh pr create --base main --head dev --fill`. Merge it once the tests check passes.
-3. **Release from `main`:** `gh release create vX.Y.Z --target main --prerelease --generate-notes --title "vX.Y.Z"`. This creates the tag on `main` and writes the notes from the merged pull requests. Drop `--prerelease` from 1.0.0 on.
-4. **Bring `dev` level with `main`:** `git pull origin main` in the `dev` checkout, so the merge commit doesn't show up as a difference next time.
-5. **Update your installed relay** when no session is held: `git pull` in the installed checkout, then `bin/relay install-claude`. Re-running `install-claude` is always safe; it only changes anything when the commands or hooks have changed. A held session's hook keeps running the code it started with (DESIGN.md, *Upgrading while sessions are held*).
+2. **Prepare the release on `dev`** (only when this pull request will be released):
+   - **Reconcile the changelog:** compare `## Unreleased` with `git log --oneline <previous tag>..dev`, and add a line for any user-visible change that's missing.
+   - **Name the version:** rename `## Unreleased` to `## vX.Y.Z (YYYY-MM-DD)`, add a new empty `## Unreleased` above it, then commit and push.
+3. **Open a pull request from `dev` to `main`:** `gh pr create --base main --head dev --fill`. Merge it once the tests check passes.
+4. **Release from `main`:** save that version's section of `CHANGELOG.md` (without its heading) as `/tmp/release-notes.md`, then run `gh release create vX.Y.Z --target main --prerelease --title "vX.Y.Z" --notes-file /tmp/release-notes.md`. This creates the tag on `main`, with the changelog section as the release notes. Drop `--prerelease` from 1.0.0 on.
+5. **Bring `dev` level with `main`:** `git pull origin main` in the `dev` checkout, so the merge commit doesn't show up as a difference next time.
+6. **Update your installed relay** when no session is held: `git pull` in the installed checkout, then `bin/relay install-claude`. Re-running `install-claude` is always safe; it only changes anything when the commands or hooks have changed. A held session's hook keeps running the code it started with (DESIGN.md, *Upgrading while sessions are held*).
 
 **Version numbers** follow `MAJOR.MINOR.PATCH`:
 - **Patch** (`0.1.1`): fixes and tests, with no change users would notice beyond the fix.
