@@ -292,7 +292,8 @@ def install_codex():
               f"[mcp_servers.relay]\ncommand = \"{py}\"\nargs = [\"{RELAY}\", \"mcp\"]\n"
               f"env = {{ RELAY_HOME = \"{store.relay_home()}\" }}\nstartup_timeout_sec = 60\n\n"
               "[mcp_servers.relay.tools.propose_reply]\napproval_mode = \"approve\"\n\n"
-              "[mcp_servers.relay.tools.show_menu]\napproval_mode = \"approve\"\n")
+              "[mcp_servers.relay.tools.show_menu]\napproval_mode = \"approve\"\n\n"
+              "[mcp_servers.relay.tools.no_reply_menu]\napproval_mode = \"approve\"\n")
     for project in cfg["personas"]:
         tables += f"\n[projects.\"{project}\"]\ntrust_level = \"trusted\"\n"
     tables += f"{finish}\n"

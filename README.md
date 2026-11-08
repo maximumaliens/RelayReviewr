@@ -84,9 +84,11 @@ To review just one reply from a session that isn't linked, type `/relay-review i
 |---|---|---|
 | **Send to <session>** | That session receives the draft exactly as shown and carries on. When it next finishes, its new report appears in the same conversation. | The draft is right. |
 | **Copy for <session>** | Puts the draft on the clipboard for a session that isn't held (busy, released or past the 4-hour limit). Nothing is sent; paste it yourself. | The session you want can't receive right now. |
-| **Discuss** (or Esc) | The menu closes and you talk with Codex normally. When Codex has a revised draft, the menu comes back. **Claude stays held** the whole time. | You want changes, or have questions. |
+| **Discuss** (or Esc) | The menu closes and you talk with Codex normally. When Codex has a revised draft, the menu comes back. **Claude stays held** the whole time, so anything you type in Claude queues until Send, Finish or Esc. To answer Claude directly, choose **Finish** first (Codex will tell you, and can bring the menu back). | You want changes, or have questions. |
 | **Keep waiting** | The menu closes and Claude stays held. Ask Codex for "the menu" when you're ready. | You need a break or more time. |
 | **Finish without sending — release <session>** | Releases the source session with no reply. Other held sessions stay held. | Claude needs nothing more: for example, it only reported that it's done. |
+
+**When Claude needs nothing.** If a report only restates a decision request, acknowledges, or waits for you, Codex doesn't draft an acknowledgement (any reply would come back as another report). It says so and shows a **no-reply menu** with Discuss, Keep waiting and Finish without sending, never Send or Copy, and recommends Finish. Nothing is sent or finished until you choose. If Codex later drafts a reply for the same report, the normal menu returns. You get the usual "review ready" notification, worded "no reply needed".
 
 There's one Send option for each held session on the same project and ticket, with the source session first. The menu shows each one's folder, branch and commit, and when those were read. Codex may suggest a recipient; that's shown as text only and never changes which option is highlighted.
 
@@ -134,6 +136,8 @@ Claude Code shows a delivered draft as **"Stop hook error: …"**. That's Claude
 - Codex reviews read-only: it can read your project but can't change it.
 
 ### After you update the relay: what an existing conversation picks up
+
+A new version adds a tool (`no_reply_menu`) and revises tool descriptions, which live in the tool server. Reopening the conversation in a Codex window (`relay review <ticket>`, then wait about 15 s for it to attach) or restarting the Codex daemon replaced the tool server in testing; whether an existing conversation then lists and calls the new tool is checked by acceptance test 23 (see DESIGN.md for its result). The guidance in the operating instructions about the no-reply path and Discuss keeping Claude held reaches only conversations created after the update; the short line in each report's header carries the no-reply hint to older ones. Update the relay when no session is held. The procedure doesn't refresh creation-time operating instructions.
 
 This is what acceptance test 22 observed, with a conversation created from the previous version's instructions. It is a refresh investigation. It does not meet the requirement to update an existing conversation's operating instructions, which is still open.
 

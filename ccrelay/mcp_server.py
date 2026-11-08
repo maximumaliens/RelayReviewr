@@ -27,7 +27,11 @@ HANDOFF_PROP = {"type": "string", "description": "The handoff your draft answers
 TOOLS = [
     {"name": "propose_reply",
      "description": "Save your drafted return prompt for Claude and show the user the review menu. "
-                    "Call after every assessment and after each revision. Returns the user's choice. "
+                    "Call when Claude needs an instruction, and after each revision. If Claude needs no instruction "
+                    "(its report only restates a decision request, acknowledges, or waits for the owner), do not "
+                    "draft an acknowledgement: call no_reply_menu instead. Returns the user's choice. "
+                    "Discuss keeps Claude held: if the owner wants to answer Claude directly, recommend Finish "
+                    "first and call show_menu so they can. "
                     "Give EITHER `draft` (free text, sent exactly as you write it) OR `copy` (the relay copies "
                     "the stored report named by `handoff` itself, so nothing is retyped), optionally followed by "
                     "your `additions`; never `draft` together with `copy` or `additions`. "
@@ -62,7 +66,19 @@ TOOLS = [
                                                         "the draft. Shown to the user as text only."}},
          "required": ["handoff"]}},
     {"name": "show_menu",
-     "description": "Show the user the review menu again for the draft on one handoff. Returns the user's choice.",
+     "description": "Show the user the review menu again for the draft on one handoff, or the no-reply menu "
+                    "again if you assessed that Claude needs no reply. Returns the user's choice. Discuss keeps "
+                    "Claude held: if the owner wants to answer Claude directly, recommend Finish first and call "
+                    "this so they can.",
+     "inputSchema": {"type": "object", "properties": {"handoff": HANDOFF_PROP}, "required": ["handoff"]}},
+    {"name": "no_reply_menu",
+     "description": "Use instead of propose_reply when Claude needs no instruction: its report only restates a "
+                    "decision request, acknowledges, or waits for the owner. Do not draft an acknowledgement; "
+                    "say so to the owner, call this for the handoff, and recommend Finish. Any reply Claude gives "
+                    "comes back as another handoff. Shows a menu with Discuss, Keep waiting and Finish without "
+                    "sending, never Send or Copy, and returns the user's choice. Only for a handoff that has no "
+                    "draft; nothing is sent or finished unless the user chooses it. Use show_menu to reopen it; "
+                    "a draft you save later brings back the normal menu.",
      "inputSchema": {"type": "object", "properties": {"handoff": HANDOFF_PROP}, "required": ["handoff"]}},
 ]
 
@@ -170,7 +186,7 @@ def tool(server, name, args, thread_id):
     cfg = store.load_config()
     if not thread_id:
         return "Relay error: this call carried no conversation id."
-    if name not in ("propose_reply", "show_menu"):
+    if name not in ("propose_reply", "show_menu", "no_reply_menu"):
         return f"Relay error: unknown tool {name}"
     h, rejection = named_handoff(db, thread_id, args.get("handoff"))
     if rejection:
@@ -184,6 +200,10 @@ def tool(server, name, args, thread_id):
 
 
 def menu_call(server, db, cfg, name, args, h):
+    if name == "no_reply_menu":
+        rejection = record_no_reply(db, cfg, h)
+        if rejection:
+            return rejection
     if name == "propose_reply":
         draft, copy, additions = (args.get(k) for k in ("draft", "copy", "additions"))  # null = left out
         parts = None
@@ -206,6 +226,33 @@ def menu_call(server, db, cfg, name, args, h):
                     "Wait for Claude's next output before drafting.")
         save_draft(db, cfg, h, draft, recipient, parts)
     return menu(server, db, cfg, h["id"])
+
+
+def record_no_reply(db, cfg, h):
+    """Record Codex's assessment that hand-off `h` needs no reply; a reason if it can't be, with nothing written.
+    A hand-off already assessed this way just reopens its menu."""
+    if h["status"] == "sent":
+        return (f"Not saved: handoff H{h['id']} is already sent. Wait for Claude's next output before assessing it. "
+                "Nothing was changed.")
+    draft = store.latest_draft(db, h["id"])
+    if draft:
+        return (f"Rejected: handoff H{h['id']} already has a draft (D{draft['id']}), so it needs a reply from the "
+                f"menu: use show_menu H{h['id']}. The draft and the handoff are unchanged.")
+    if store.no_reply(db, h["id"]):
+        return None
+    h = resolve_stale(db, h)
+    if h["status"] not in store.WAITING or not store.mark_no_reply(db, h["id"]):
+        h = store.handoff(db, h["id"])
+        if store.no_reply(db, h["id"]):
+            return None  # another call assessed it first
+        return (f"Not recorded: Claude is no longer waiting for H{h['id']} ({h['reason'] or h['status']}). "
+                "Nothing was changed.")
+    try:  # a notice never changes the recorded assessment
+        notify(db, f"{store.about(db, h)}: review ready — no reply needed",
+               "Open the Codex conversation to choose Discuss, Keep waiting or Finish.", h["id"])
+    except OSError as e:
+        store.event(db, "notify_failed", str(e), h["id"])
+    return None
 
 
 def save_draft(db, cfg, h, text, recipient=None, parts=None):
@@ -269,6 +316,8 @@ def menu(server, db, cfg, hid, gone=None):
     h = resolve_stale(db, store.handoff(db, hid))
     d = store.latest_draft(db, hid)
     if not d:
+        if store.no_reply(db, hid):
+            return no_reply_screen(server, db, cfg, h)
         return f"No draft yet for H{hid}. Draft one and call propose_reply."
     d = resolve_draft(db, d)
     waiting = h["status"] in store.WAITING
@@ -348,24 +397,85 @@ def menu(server, db, cfg, hid, gone=None):
             return menu(server, db, cfg, hid, gone=store.handoff(db, r["id"]))
         return result
     if answer == KEEP:
-        return ("The user is keeping Claude waiting. End your turn now with no further output; "
-                "call show_menu if they later ask for the menu.")
+        return KEEP_RESULT
     if answer == finish:
-        if not store.set_handoff(db, hid, "finished", "the user finished without sending", only_from=FINISHABLE):
-            return (f"Nothing to release: {names[hid]} (H{hid}) is {store.handoff(db, hid)['status']} now. "
-                    "Nothing was sent.")
-        return "Claude was released without a reply. Nothing was sent."
+        return finish_result(db, names[hid], hid)
     if answer == copy or answer in copies:
         return copy_draft(db, d)
+    return discuss_result(db, cfg, h, "this draft", "When you have a revised draft, call propose_reply again.")
+
+
+KEEP_RESULT = ("The user is keeping Claude waiting. End your turn now with no further output; "
+               "call show_menu if they later ask for the menu.")
+
+
+def finish_result(db, name, hid):
+    if not store.set_handoff(db, hid, "finished", "the user finished without sending", only_from=FINISHABLE):
+        return (f"Nothing to release: {name} (H{hid}) is {store.handoff(db, hid)['status']} now. "
+                "Nothing was sent.")
+    return "Claude was released without a reply. Nothing was sent."
+
+
+def discuss_result(db, cfg, h, subject, next_step):
+    """What Codex is told after Discuss: end the turn, a queued report runs first, and the source stays held (so
+    the owner must Finish before answering Claude directly)."""
     queued = reports_queued(db, cfg, h)
     first = ""
     if queued:
         first = (" " + "; ".join(f"Report H{q['id']} ({store.session_name(q)})" for q in queued)
                  + (" is queued in this conversation and runs" if len(queued) == 1 else
                     " are queued in this conversation and run") + " first, as soon as "
-                 "you end your turn. Assess it then; the user's discussion of this draft continues after it.")
+                 f"you end your turn. Assess it then; the user's discussion of {subject} continues after it.")
+    held = ""
+    if store.handoff(db, h["id"])["status"] in store.WAITING:
+        held = (f" {store.session_name(h)[:1].upper() + store.session_name(h)[1:]} (H{h['id']}) is still held: "
+                "anything the user types in Claude queues until Send, Finish or Esc. If they want to answer Claude "
+                "directly, tell them to choose Finish first, and call show_menu so they can.")
     return ("The user wants to discuss. End your turn now with no further output and wait for their message."
-            f"{first} When you have a revised draft, call propose_reply again.")
+            f"{held}{first} {next_step}")
+
+
+def no_reply_screen(server, db, cfg, h):
+    """The menu for a hand-off Codex assessed as needing no reply: Discuss, Keep waiting, Finish; never a draft's
+    Send or Copy. Once the source stopped waiting, Keep waiting means nothing and isn't offered."""
+    hid = h["id"]
+    waiting = h["status"] in store.WAITING
+    names = unique_names([h, *held_sessions(db, h)]) if waiting else unique_names([h])
+    finish = f"{FINISH} — release {names[hid]}"
+    choices = [DISCUSS, KEEP, finish] if waiting else [DISCUSS, finish]
+    state_line = "" if waiting else (f"Claude is no longer waiting ({h['reason'] or h['status']}). "
+                                     "Nothing was sent.")
+    waiting_reports = [f"H{q['id']} from {store.session_name(q)}" for q in reports_queued(db, cfg, h)]
+    if waiting_reports:
+        state_line = "\n".join(p for p in (state_line, "Reports waiting for assessment: " + ", ".join(waiting_reports)) if p)
+    message = "\n".join(p for p in (
+        f"Answering report H{hid} · ticket {h['label']} · Claude session {h['session_id'][:8]}",
+        "Codex assessed that Claude needs no reply. There is no draft, and nothing will be sent.",
+        state_line,
+        f"Finish releases {names[hid]} without a reply." if waiting else "") if p)
+
+    poll = {}
+
+    def source_stopped():
+        if not waiting:
+            return None
+        conn = poll.setdefault("db", store.connect())
+        cur = resolve_stale(conn, store.handoff(conn, hid))
+        return None if cur["status"] in store.WAITING else cur["status"]
+
+    answer = server.elicit(message, choices, abort=source_stopped)
+    if answer is ABORTED:
+        h = store.handoff(db, hid)
+        store.event(db, "menu:withdrawn", f"no-reply {h['status']}", hid)
+        return (f"The menu was withdrawn: Claude is no longer waiting ({h['reason'] or h['status']}). Nothing was "
+                "sent. Tell the user in one line, then end your turn.")
+    store.event(db, "menu:answer", f"no-reply {answer!r}", hid)
+    if answer == KEEP and waiting:
+        return KEEP_RESULT
+    if answer == finish:
+        return finish_result(db, names[hid], hid)
+    return discuss_result(db, cfg, h, "this report", "If Claude still needs no reply, call show_menu when the "
+                          "user wants the menu; if it needs an instruction, call propose_reply.")
 
 
 def reports_queued(db, cfg, h):

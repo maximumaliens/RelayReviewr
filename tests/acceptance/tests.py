@@ -896,11 +896,90 @@ def t22_refresh_existing_conversation():
     return out
 
 
+PRE_NO_REPLY_COMMIT = "6cefec1"  # the last commit before the no-reply path (#3)
+
+
+def t23_refresh_for_no_reply():
+    """#3: after the documented server refresh, does a conversation created before the upgrade list the new
+    `no_reply_menu` tool with the revised wording? As in test 22 the old tool server is stood in for by hiding the
+    tools. Kept apart: [process] tool-server pids (the only hard tool evidence); [recorded] the developer messages
+    (the creation-time instructions must NOT gain the new section: that part of #2 stays unresolved);
+    [model-reported] Codex's answer, which can only make the verdict INCONCLUSIVE. Calling the tool and the Discuss
+    result are covered by the unit checks, not here."""
+    import re
+    from ccrelay import codexrpc, intake
+    from harness import RELAY_HOME
+    label = f"T23-{TAG}"
+    old = subprocess.run(["git", "show", f"{PRE_NO_REPLY_COMMIT}:ccrelay/ops_instructions.md"],
+                         cwd=os.path.dirname(RELAY), capture_output=True, text=True, check=True).stdout
+    check("no_reply_menu" not in old and "no_reply_menu" in intake.OPS_INSTRUCTIONS,
+          "only the current operating instructions mention no_reply_menu")
+    cfg, conn = store.load_config(), store.connect()
+    hide = RELAY_HOME / "test-hide-tools"
+    current = intake.OPS_INSTRUCTIONS
+    intake.OPS_INSTRUCTIONS = old
+    hide.touch()  # the tool server of the "previous version" has no no_reply_menu
+    try:
+        tid = intake.ensure_thread(conn, cfg, label, str(REPO))
+    finally:
+        intake.OPS_INSTRUCTIONS = current
+    question = ("Do not call any relay tool. Use your exec tool once to inspect ALL_TOOLS (for example "
+                "ALL_TOOLS.filter(x => /no_reply_menu/.test(x.name))). A1: is a no_reply_menu tool listed? "
+                "A2: if so, does its description contain the word 'acknowledgement'? "
+                "Reply with exactly one line: A1=<yes or no> A2=<yes or no or na>")
+    obs = []
+
+    def probe(action):
+        n = len(obs) + 1
+        codexrpc.ensure_daemon(cfg)
+        codexrpc.ensure_loaded(cfg, tid)
+        turns = len(thread_turns(tid))
+        codexrpc.queue_message(cfg, tid, question, f"t23-probe-{n}")
+        wait_until(lambda: len(thread_turns(tid)) > turns and codex_idle(label), 240, f"probe {n} answered")
+        said = agent_text(thread_turns(tid)[-1])
+        m = re.search(r"A1=(yes|no)\s+A2=(yes|no|na)", said, re.I)
+        pids = tool_server_pids()
+        check(len(pids) == 1, f"probe {n} ({action}): exactly one relay tool server is running: {pids}")
+        obs.append({"n": n, "action": action, "pid": pids[0], "hidden": hide.exists(),
+                    "answers": tuple(g.lower() for g in m.groups()) if m else None, "said": said[:120],
+                    "section": "When Claude needs nothing" in developer_text(tid)})
+        log(f"  probe {n} after {action}: tool server pid {pids[0]}; model-reported {obs[-1]['answers']}")
+
+    try:
+        probe("creation, the previous version's tool server (no_reply_menu hidden)")
+    finally:
+        hide.unlink()  # the upgrade: the next tool server serves no_reply_menu
+    probe("the upgrade, next turn in the same loaded conversation")
+    codex_open("cx23", label)
+    time.sleep(15)  # let the window finish attaching
+    probe("reopening the conversation in a Codex window and waiting 15 s")
+    kill_session("cx23")
+
+    check(obs[1]["pid"] == obs[0]["pid"], "[process] a next turn kept the old tool server")
+    check(obs[2]["pid"] != obs[1]["pid"], "[process] reopening the window after 15 s replaced the tool server")
+    check(not any(o["section"] for o in obs),
+          "[recorded] the conversation's developer messages never gained the no-reply section")
+    notes = []
+    for o, want in zip(obs, [("no", "na"), ("no", "na"), ("yes", "yes")]):
+        if o["answers"] != want:
+            notes.append(f"probe {o['n']} ({o['action']}): Codex answered {o['answers'] or o['said']!r}, "
+                         f"expected {want} from the server process")
+    out = [f"[process] tool server pids by probe: {[o['pid'] for o in obs]}",
+           "[recorded] the developer messages never contained the no-reply section: the creation-time "
+           "instructions are not refreshed (#2's requirement stays unresolved)",
+           "[model-reported] " + "; ".join(f"{o['n']}: {o['answers']}" for o in obs if o["answers"]),
+           "scope: listing and wording of the new tool only. Calling it and the Discuss result are unit-checked."]
+    if notes:
+        out.append("INCONCLUSIVE: model-reported answers disagree with the process evidence: " + " | ".join(notes))
+    return out
+
+
 ALL = [t01_exact_text, t02_correct_session, t03_instruction, t04_no_duplicates, t05_visible_failure,
        t06_esc, t07_open_window_cycle, t08_menu_survival, t09_escalation, t10_loaded_guard, t11_no_draft,
        e1_claude_killed, e2_consecutive_sends, t14_queued_behind_menu, t15_same_ticket, t16_standing_context,
        t17_permission, t18_long_labels, t19_link_creates_conversation, t20_review_once_creates_conversation,
-       t21_copied_draft, t22_refresh_existing_conversation]
+       t21_copied_draft, t22_refresh_existing_conversation, t23_refresh_for_no_reply]
 # 12 = E1, 13 = E2 (extra checks; design test 12 is the dev-box check). 14-18 are the cross-session checks of #8.
 # 19-20 check #9: the conversation is created by /relay-link and /relay-review.
 # 21-22 check #2: a copied draft of 8 KB or more delivered byte-exact, and what refreshes an existing conversation.
+# 23 checks #3: after the documented server refresh, an older conversation lists the no-reply tool.

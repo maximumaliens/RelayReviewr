@@ -223,8 +223,9 @@ def wait(db, cfg, hid):
 
 
 def check_no_draft(db, cfg, h):
-    """If Codex finished the queued turn without saving a draft, say so once."""
-    if store.latest_draft(db, h["id"]):
+    """If Codex finished the queued turn without saving a draft, say so once. A no-reply assessment is an
+    assessment: it has no draft on purpose."""
+    if store.latest_draft(db, h["id"]) or store.no_reply(db, h["id"]):
         return
     try:
         if h["queue_item_id"] in codexrpc.queued_ids(cfg, h["thread_id"]):
