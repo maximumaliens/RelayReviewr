@@ -730,37 +730,18 @@ def t21_copied_draft():
     """#2: a copied draft of 8 KB or more, made by Codex's real propose_reply call (copy "all" plus additions),
     reaches real Claude byte-identical. The stored report is replaced by a known text so its size and bytes are
     fixed; everything after that is the real path."""
-    import re
     label = f"T21-{TAG}"
-    # Not first_review: a turn can be filed more than once (two Stop hooks in a stale test configuration), and the
-    # newest report then waits behind the first one's menu. Any report with a menu pending will do.
-    claude_start("cc21", label)
-    claude_say("cc21", "Reply with just: READY")
-    wait_until(lambda: [x for x in handoffs(label) if x["status"] == "review_ready"], 300, "a report ready for review")
+    sid, h = first_review("cc21", label)
+    time.sleep(10)  # a second report for the same turn, if one were going to be filed, would be by now
+    check(len(handoffs(label)) == 1, f"the READY turn was filed as one hand-off ({[x['id'] for x in handoffs(label)]})")
     codex_open("cx21", label)
     report = "".join(f"{i:03d} naïve café — 日本語 ✓ run `python3 -m unittest`  \t\r\n" for i in range(1, 140)) \
         + "final line without a newline"
     additions = "Reviewer notes: T21-ADDITIONS-OK"
     check(len(report.encode()) >= 8192, f"the report is {len(report.encode())} bytes (>= 8 KB)")
-    # A turn can file more than one report; Discuss each menu until Codex has nothing queued, then target the
-    # report whose menu was open last.
-    target = None
-    for _ in range(4):
-        wait_menu("cx21")
-        target = int(re.search(r"Answering report H(\d+)", screen("cx21")).group(1))
-        choose("cx21", "Discuss")
-        time.sleep(4)  # the answered menu leaves the screen
-        settled = [0]
-
-        def quiet():
-            menu = menu_options("cx21")
-            if menu:
-                return "menu"
-            settled[0] = settled[0] + 1 if codex_idle(label) else 0
-            return "idle" if settled[0] >= 10 else None
-        if wait_until(quiet, 120, "the next menu or an idle Codex", interval=1.0) == "idle":
-            break
-    h = q("SELECT * FROM handoffs WHERE id=?", target)[0]
+    wait_menu("cx21")
+    choose("cx21", "Discuss")
+    wait_until(lambda: menu_options("cx21") is None and codex_idle(label), 120, "Codex idle after Discuss")
     conn = store.connect()
     conn.execute("UPDATE handoffs SET claude_message=? WHERE id=?", (report, h["id"]))
     ask_codex("cx21", f"Call the relay propose_reply tool now with handoff H{h['id']}, copy \"all\" and additions "
@@ -818,10 +799,14 @@ def tool_server_pids():
 
 
 def t22_refresh_existing_conversation():
-    """#2: what an existing conversation picks up, and after which action. The conversation is created with the
-    previous commit's operating instructions; the relay then runs the current ones. The relay tools are hidden
-    after the conversation is first used (the same switch test 11 uses), which shows when Codex asks the running
-    tool server for its tool list again. Each probe is a question Codex answers without calling a tool."""
+    """#2: a refresh investigation, not a pass of the requirement to update an existing conversation's operating
+    instructions (that stays open). The conversation is created with the previous commit's instructions; the relay
+    then runs the current ones. The relay tools are hidden once the conversation has been used (the switch test 11
+    uses), which shows whether Codex asks the tool server for its list again. Three kinds of evidence are kept apart:
+      [process]  the tool server's process ids, observed, and the only thing that can FAIL the test on tools;
+      [recorded] the developer messages in the conversation's rollout, the evidence for the instructions;
+      [model-reported] Codex's own answers about its instructions and tools. A mismatch with the expectation the
+                 process ids give makes the verdict INCONCLUSIVE: it cannot show a refresh by itself."""
     import re
     from ccrelay import codexrpc, intake
     from harness import RELAY_HOME, stop_daemon
@@ -843,43 +828,72 @@ def t22_refresh_existing_conversation():
                 "ALL_TOOLS.filter(x => /propose_reply/.test(x.name)) and the property names of its input schema) "
                 "and say whether a propose_reply tool is listed. A3: if it is, does its input schema have a "
                 "property named copy? Reply with exactly one line: A1=<yes or no> A2=<yes or no> A3=<yes or no or na>")
-    n, pids = [0], []
+    hide = RELAY_HOME / "test-hide-tools"
+    seen, obs = {}, []  # seen: tool-server pid -> were the tools hidden when it first appeared
 
-    def probe(after):
-        n[0] += 1
+    def probe(action):
+        n = len(obs) + 1
         codexrpc.ensure_daemon(cfg)
         codexrpc.ensure_loaded(cfg, tid)
         turns = len(thread_turns(tid))
-        codexrpc.queue_message(cfg, tid, question, f"t22-probe-{n[0]}")
-        wait_until(lambda: len(thread_turns(tid)) > turns and codex_idle(label), 240, f"probe {n[0]} answered")
+        codexrpc.queue_message(cfg, tid, question, f"t22-probe-{n}")
+        wait_until(lambda: len(thread_turns(tid)) > turns and codex_idle(label), 240, f"probe {n} answered")
         said = agent_text(thread_turns(tid)[-1])
         m = re.search(r"A1=(yes|no)\s+A2=(yes|no)\s+A3=(yes|no|na)", said, re.I)
-        check(m, f"probe {n[0]} ({after}) answered in the asked form: {said[:200]!r}")
-        a1, a2, a3 = (g.lower() for g in m.groups())
-        log(f"  probe after {after}: instructions have the isolation section={a1}; propose_reply available={a2}; "
-            f"accepts copy={a3}")
-        pids.append(f"{n[0]}={tool_server_pids()}")
-        return f"after {after}: A1 instructions-have-isolation-section={a1}, A2 propose_reply-available={a2}, A3 accepts-copy={a3}"
+        pids = tool_server_pids()
+        check(len(pids) == 1, f"probe {n} ({action}): exactly one relay tool server is running: {pids}")
+        seen.setdefault(pids[0], hide.exists())
+        answers = tuple(g.lower() for g in m.groups()) if m else None
+        obs.append({"n": n, "action": action, "pid": pids[0], "answers": answers, "said": said[:120],
+                    "section_recorded": "Sessions are isolated" in developer_text(tid)})
+        log(f"  probe {n} after {action}: tool server pid {pids[0]}; model-reported {answers}; "
+            f"instructions recorded with the section: {obs[-1]['section_recorded']}")
 
-    results = [probe("creation, tools served by the current code")]
-    (RELAY_HOME / "test-hide-tools").touch()
+    probe("creation, tools served")
+    hide.touch()
     try:
-        results.append(probe("the tool server now hides its tools, next turn in the same loaded conversation"))
+        probe("the tool server hides its tools; next turn in the same loaded conversation")
         codex_open("cx22", label)
         time.sleep(15)  # let the window finish attaching
-        results.append(probe("reopening the conversation in a Codex window"))
+        probe("reopening the conversation in a Codex window and waiting 15 s")
         kill_session("cx22")
         stop_daemon()
-        results.append(probe("restarting the Codex daemon"))
+        probe("restarting the Codex daemon")
     finally:
-        (RELAY_HOME / "test-hide-tools").unlink()
-    results.append(probe("the tools served again, next turn without a restart"))
+        hide.unlink()
+    probe("the tools served again; next turn without a restart")
     stop_daemon()
-    results.append(probe("restarting the Codex daemon again, tools served"))
-    check("Sessions are isolated" not in developer_text(tid),
-          "the conversation's recorded instructions still lack the isolation section after every action")
-    results.append("the tool server's process ids at each probe: " + "; ".join(pids))
-    return results
+    probe("restarting the Codex daemon again, tools served")
+
+    # [process] observed, hard: what replaced the tool server
+    same_or_new = [None] + [o["pid"] == obs[i]["pid"] for i, o in enumerate(obs[1:])]
+    expect_same = {2: True, 3: False, 4: False, 5: True, 6: False}  # next turn / reopen / restart / next turn / restart
+    for o, same in zip(obs[1:], same_or_new[1:]):
+        want = expect_same[o["n"]]
+        check(same == want, f"[process] probe {o['n']} ({o['action']}): the tool server was "
+                            f"{'kept' if same else 'replaced'}, expected {'kept' if want else 'replaced'}")
+    # [recorded] the instructions the conversation holds, hard
+    check(not any(o["section_recorded"] for o in obs),
+          "[recorded] the conversation's developer messages lack the isolation section at every probe")
+    # [model-reported] against what the process ids imply; a mismatch is not proof either way
+    notes = []
+    for o in obs:
+        hidden = seen[o["pid"]]
+        want = ("no", "yes", "yes") if not hidden else ("no", "no", "na")
+        if o["answers"] != want:
+            notes.append(f"probe {o['n']} ({o['action']}): Codex answered {o['answers'] or o['said']!r}, "
+                         f"expected {want} from the server process (started with tools "
+                         f"{'hidden' if hidden else 'served'})")
+    out = [f"[process] tool server pids by probe: {[o['pid'] for o in obs]}; kept on the next turn (probes 2, 5), "
+           "replaced on reopening the window after 15 s (3) and on each daemon restart (4, 6)",
+           "[recorded] the developer messages never contained the isolation section, at any probe",
+           "[model-reported] " + "; ".join(f"{o['n']}: A1={o['answers'][0]} A2={o['answers'][1]} A3={o['answers'][2]}"
+                                           for o in obs if o["answers"]),
+           "scope: a refresh investigation. Updating an existing conversation's operating instructions is still "
+           "open: no tested way exists."]
+    if notes:
+        out.append("INCONCLUSIVE: model-reported answers disagree with the process evidence: " + " | ".join(notes))
+    return out
 
 
 ALL = [t01_exact_text, t02_correct_session, t03_instruction, t04_no_duplicates, t05_visible_failure,

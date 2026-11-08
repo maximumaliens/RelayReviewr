@@ -13,6 +13,7 @@ Everything lives in two folders, and nothing the user has installed is read or c
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -85,9 +86,37 @@ def write_codex_config():
     relay("install-codex")
 
 
+RELAY_HOOK_COMMAND = re.compile(r".*/bin/relay hook-(stop|session-end)")
+
+
+def drop_relay_hooks_of_any_checkout(settings):
+    """Remove every relay hook, whichever checkout's bin/relay it names, from the isolated Claude settings, so the
+    install that follows leaves only this checkout's. The production installer removes only its own checkout's
+    commands, so a hook left by another checkout (the development checkout was moved or renamed) would run
+    beside this one and file each report twice. Other hooks and settings are kept."""
+    hooks = settings.get("hooks", {})
+    for event in list(hooks):
+        groups = []
+        for g in hooks[event]:
+            kept = [h for h in g.get("hooks", []) if not RELAY_HOOK_COMMAND.fullmatch(h.get("command") or "")]
+            if kept or not g.get("hooks"):
+                groups.append({**g, "hooks": kept} if g.get("hooks") else g)
+        if groups:
+            hooks[event] = groups
+        else:
+            del hooks[event]
+    if "hooks" in settings and not settings["hooks"]:
+        del settings["hooks"]
+
+
 def write_claude_config():
     """The development relay's hooks and commands only, auto mode, and no first-run screens for REPO."""
     CLAUDE_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    settings_file = CLAUDE_CONFIG_DIR / "settings.json"
+    if settings_file.exists():
+        existing = json.loads(settings_file.read_text())
+        drop_relay_hooks_of_any_checkout(existing)
+        settings_file.write_text(json.dumps(existing, indent=2) + "\n")
     relay("install-claude", RELAY_CLAUDE_HOME=str(CLAUDE_CONFIG_DIR))
     for backup in CLAUDE_CONFIG_DIR.glob("settings.json.relay-backup-*"):  # one per reset; nothing to keep
         backup.unlink()
