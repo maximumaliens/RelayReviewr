@@ -897,15 +897,36 @@ def t22_refresh_existing_conversation():
 
 
 PRE_NO_REPLY_COMMIT = "6cefec1"  # the last commit before the no-reply path (#3)
+DISCUSS_RESULT_PHRASES = ("The user wants to discuss", "still held", "Finish first", "show_menu", "End your turn now")
+
+
+def seed_no_reply_handoff(label, tid):
+    """A hand-off in the existing conversation that is held by a real waiting hook, with no report queued to
+    Codex: only the call the harness asks Codex to make can touch it. Returns (hand-off id, hook process)."""
+    conn = store.connect()
+    t = store.now()
+    hid = conn.execute(
+        "INSERT INTO handoffs (session_id, label, thread_id, cwd, transcript_path, claude_message, status, hook_pid,"
+        " recipient_aware, display_name, created, updated) VALUES (?, ?, ?, ?, ?, ?, 'assessing', ?, 1, 'builder', ?, ?)",
+        (f"t23{TAG}0000000000"[:16], label, tid, str(REPO), str(REPO / "t23.jsonl"),
+         "Nothing more to do. I'm waiting for the owner's decision on the open question.", os.getpid(), t, t)).lastrowid
+    root = os.path.dirname(os.path.dirname(RELAY))
+    code = ("from ccrelay import claude_hooks, store; import sys; "
+            "sys.exit(claude_hooks.wait(store.connect(), store.load_config(), int(sys.argv[1])))")
+    hook = subprocess.Popen(["python3", "-c", code, str(hid)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, env=dict(os.environ, CLAUDE_PID=str(os.getpid()), PYTHONPATH=root))
+    conn.execute("UPDATE handoffs SET hook_pid=? WHERE id=?", (hook.pid, hid))
+    return hid, hook
 
 
 def t23_refresh_for_no_reply():
-    """#3: after the documented server refresh, does a conversation created before the upgrade list the new
-    `no_reply_menu` tool with the revised wording? As in test 22 the old tool server is stood in for by hiding the
-    tools. Kept apart: [process] tool-server pids (the only hard tool evidence); [recorded] the developer messages
-    (the creation-time instructions must NOT gain the new section: that part of #2 stays unresolved);
-    [model-reported] Codex's answer, which can only make the verdict INCONCLUSIVE. Calling the tool and the Discuss
-    result are covered by the unit checks, not here."""
+    """#3: after the documented server refresh, a conversation created before the upgrade lists AND CALLS the new
+    `no_reply_menu` tool, and a Discuss choice returns the revised Discuss result. As in test 22 the old tool
+    server is stood in for by hiding the tools. Evidence is kept apart: [process] tool-server pids; [recorded] the
+    developer messages (creation-time instructions are NOT refreshed: #2 stays unresolved) and the tool call's
+    recorded result in the conversation; [store] the marker, drafts and hold; [model-reported] Codex's reading of
+    its tool descriptions, which can only make the verdict INCONCLUSIVE. No PASS without the recorded call result:
+    a call that never happened, or whose result can't be found, is INCONCLUSIVE, never a pass."""
     import re
     from ccrelay import codexrpc, intake
     from harness import RELAY_HOME
@@ -924,9 +945,11 @@ def t23_refresh_for_no_reply():
     finally:
         intake.OPS_INSTRUCTIONS = current
     question = ("Do not call any relay tool. Use your exec tool once to inspect ALL_TOOLS (for example "
-                "ALL_TOOLS.filter(x => /no_reply_menu/.test(x.name))). A1: is a no_reply_menu tool listed? "
-                "A2: if so, does its description contain the word 'acknowledgement'? "
-                "Reply with exactly one line: A1=<yes or no> A2=<yes or no or na>")
+                "ALL_TOOLS.filter(x => /no_reply_menu|show_menu|propose_reply/.test(x.name))). A1: is a "
+                "no_reply_menu tool listed? A2: does its description contain both 'acknowledgement' and "
+                "'recommend Finish'? A3: does the show_menu description contain 'Finish first'? A4: does the "
+                "propose_reply description contain 'no_reply_menu'? Reply with exactly one line: "
+                "A1=<yes/no> A2=<yes/no/na> A3=<yes/no> A4=<yes/no>")
     obs = []
 
     def probe(action):
@@ -937,10 +960,10 @@ def t23_refresh_for_no_reply():
         codexrpc.queue_message(cfg, tid, question, f"t23-probe-{n}")
         wait_until(lambda: len(thread_turns(tid)) > turns and codex_idle(label), 240, f"probe {n} answered")
         said = agent_text(thread_turns(tid)[-1])
-        m = re.search(r"A1=(yes|no)\s+A2=(yes|no|na)", said, re.I)
+        m = re.search(r"A1=(yes|no)\s+A2=(yes|no|na)\s+A3=(yes|no)\s+A4=(yes|no)", said, re.I)
         pids = tool_server_pids()
         check(len(pids) == 1, f"probe {n} ({action}): exactly one relay tool server is running: {pids}")
-        obs.append({"n": n, "action": action, "pid": pids[0], "hidden": hide.exists(),
+        obs.append({"n": n, "action": action, "pid": pids[0],
                     "answers": tuple(g.lower() for g in m.groups()) if m else None, "said": said[:120],
                     "section": "When Claude needs nothing" in developer_text(tid)})
         log(f"  probe {n} after {action}: tool server pid {pids[0]}; model-reported {obs[-1]['answers']}")
@@ -951,27 +974,71 @@ def t23_refresh_for_no_reply():
         hide.unlink()  # the upgrade: the next tool server serves no_reply_menu
     probe("the upgrade, next turn in the same loaded conversation")
     codex_open("cx23", label)
-    time.sleep(15)  # let the window finish attaching
+    time.sleep(15)  # let the window finish attaching: the documented refresh
     probe("reopening the conversation in a Codex window and waiting 15 s")
-    kill_session("cx23")
-
     check(obs[1]["pid"] == obs[0]["pid"], "[process] a next turn kept the old tool server")
     check(obs[2]["pid"] != obs[1]["pid"], "[process] reopening the window after 15 s replaced the tool server")
     check(not any(o["section"] for o in obs),
           "[recorded] the conversation's developer messages never gained the no-reply section")
-    notes = []
-    for o, want in zip(obs, [("no", "na"), ("no", "na"), ("yes", "yes")]):
-        if o["answers"] != want:
-            notes.append(f"probe {o['n']} ({o['action']}): Codex answered {o['answers'] or o['said']!r}, "
-                         f"expected {want} from the server process")
-    out = [f"[process] tool server pids by probe: {[o['pid'] for o in obs]}",
-           "[recorded] the developer messages never contained the no-reply section: the creation-time "
-           "instructions are not refreshed (#2's requirement stays unresolved)",
-           "[model-reported] " + "; ".join(f"{o['n']}: {o['answers']}" for o in obs if o["answers"]),
-           "scope: listing and wording of the new tool only. Calling it and the Discuss result are unit-checked."]
-    if notes:
-        out.append("INCONCLUSIVE: model-reported answers disagree with the process evidence: " + " | ".join(notes))
-    return out
+
+    # The call, in the refreshed conversation, on a hand-off held by a real waiting hook.
+    hid, hook = seed_no_reply_handoff(label, tid)
+    out = []
+    try:
+        for attempt in (1, 2):
+            ask_codex("cx23", f"Do not draft a reply and do not call propose_reply. Claude's report H{hid} only "
+                              "waits for my decision, so it needs no reply. Call the relay no_reply_menu tool now "
+                              f"with handoff H{hid}, then wait for my choice.")
+            try:
+                wait_until(lambda: menu_options("cx23"), 120, f"cx23 no-reply menu (ask {attempt})")
+                break
+            except Failed:
+                wait_until(lambda: codex_idle(label), 180, "cx23 Codex idle")
+        opts = menu_options("cx23")
+        if not opts:
+            return [f"INCONCLUSIVE: after two asks Codex never called no_reply_menu for H{hid} (no menu appeared), "
+                    "so listing was reported but the call and the Discuss result were not exercised"]
+        labels = [o[0] for o in opts]
+        check(len(labels) == 3 and labels[0] == "Discuss" and labels[1] == "Keep waiting"
+              and labels[2].startswith("Finish without sending — release "),
+              f"[menu] the no-reply menu offers exactly Discuss, Keep waiting and Finish: {labels}")
+        check(not any(l.startswith(("Send", "Copy")) for l in labels), "[menu] no Send or Copy offered")
+        check(store.no_reply(conn, hid), "[store] the no-reply assessment exists")
+        check(drafts(hid) == [], "[store] no draft exists")
+        check(store.handoff(conn, hid)["status"] == "review_ready", "[store] the hand-off is review_ready")
+        choose("cx23", "Discuss")
+        wait_until(lambda: codex_idle(label), 180, "Codex idle after Discuss")
+        turn_text = json.dumps(thread_turns(tid)[-1], ensure_ascii=False)
+        if "The user wants to discuss" not in turn_text:
+            return [f"INCONCLUSIVE: the menu was shown and Discuss chosen, but the tool call's result wasn't found "
+                    f"in the conversation's last turn, so the returned guidance wasn't observed (H{hid})"]
+        missing = [ph for ph in DISCUSS_RESULT_PHRASES if ph not in turn_text]
+        check(not missing, f"[recorded] the Discuss result Codex received has the revised guidance; missing {missing}")
+        check(store.no_reply(conn, hid) and drafts(hid) == [], "[store] after Discuss the marker stands, still no draft")
+        check(store.handoff(conn, hid)["status"] == "review_ready" and pid_alive(hook.pid),
+              "[store] after Discuss the source is still held (review_ready, its hook alive)")
+        notes = []
+        for o, want in zip(obs, [("no", "na", "no", "no"), ("no", "na", "no", "no"), ("yes", "yes", "yes", "yes")]):
+            if o["answers"] != want:
+                notes.append(f"probe {o['n']} ({o['action']}): Codex answered {o['answers'] or o['said']!r}, "
+                             f"expected {want} from the server process")
+        out = [f"[process] tool server pids by probe: {[o['pid'] for o in obs]}",
+               "[recorded] the developer messages never contained the no-reply section: creation-time "
+               "instructions are not refreshed (#2 stays unresolved)",
+               f"[recorded] real Codex called no_reply_menu for H{hid}; the menu offered {labels}; after Discuss its "
+               f"result carried {list(DISCUSS_RESULT_PHRASES)}",
+               f"[store] H{hid}: no-reply assessment present, no draft, still held after Discuss",
+               "[model-reported] " + "; ".join(f"{o['n']}: {o['answers']}" for o in obs if o["answers"]),
+               "scope: the call was requested by the harness's message to Codex; whether Codex chooses no_reply_menu "
+               "unprompted on a real acknowledgement-only report isn't tested here."]
+        if notes:
+            out.append("INCONCLUSIVE: model-reported answers disagree with the process evidence: " + " | ".join(notes))
+        return out
+    finally:
+        hook.kill()
+        hook.wait()
+        store.set_handoff(conn, hid, "finished", "test 23 cleanup")
+        kill_session("cx23")
 
 
 ALL = [t01_exact_text, t02_correct_session, t03_instruction, t04_no_duplicates, t05_visible_failure,
