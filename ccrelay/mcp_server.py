@@ -77,7 +77,8 @@ TOOLS = [
                     "say so to the owner, call this for the handoff, and recommend Finish. Any reply Claude gives "
                     "comes back as another handoff. Shows a menu with Discuss, Keep waiting and Finish without "
                     "sending, never Send or Copy, and returns the user's choice. Only for a handoff that has no "
-                    "draft; nothing is sent or finished unless the user chooses it. Use show_menu to reopen it; "
+                    "draft; nothing is sent or finished unless the user chooses it. Discuss keeps Claude held: if the owner "
+                    "wants to answer Claude directly, recommend Finish first. Use show_menu to reopen it; "
                     "a draft you save later brings back the normal menu.",
      "inputSchema": {"type": "object", "properties": {"handoff": HANDOFF_PROP}, "required": ["handoff"]}},
 ]
@@ -245,12 +246,12 @@ def record_no_reply(db, cfg, h):
         h = store.handoff(db, h["id"])
         if store.no_reply(db, h["id"]):
             return None  # another call assessed it first
-        return (f"Not recorded: Claude is no longer waiting for H{h['id']} ({h['reason'] or h['status']}). "
-                "Nothing was changed.")
+        return (f"Not recorded: H{h['id']} is {h['status']} ({h['reason'] or 'no reason recorded'}): Claude is no "
+                "longer waiting, or the report is not being assessed yet. Nothing was changed.")
     try:  # a notice never changes the recorded assessment
         notify(db, f"{store.about(db, h)}: review ready — no reply needed",
                "Open the Codex conversation to choose Discuss, Keep waiting or Finish.", h["id"])
-    except OSError as e:
+    except Exception as e:  # any failure of a notice
         store.event(db, "notify_failed", str(e), h["id"])
     return None
 
@@ -428,7 +429,8 @@ def discuss_result(db, cfg, h, subject, next_step):
                  f"you end your turn. Assess it then; the user's discussion of {subject} continues after it.")
     held = ""
     if store.handoff(db, h["id"])["status"] in store.WAITING:
-        held = (f" {store.session_name(h)[:1].upper() + store.session_name(h)[1:]} (H{h['id']}) is still held: "
+        name = store.session_name(h)
+        held = (f" {name[:1].upper() + name[1:]} (H{h['id']}) is still held: "
                 "anything the user types in Claude queues until Send, Finish or Esc. If they want to answer Claude "
                 "directly, tell them to choose Finish first, and call show_menu so they can.")
     return ("The user wants to discuss. End your turn now with no further output and wait for their message."

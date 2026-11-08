@@ -312,12 +312,12 @@ def no_reply(db, hid):
 def mark_no_reply(db, hid):
     """Record that Codex assessed hand-off `hid` as needing no reply: the marker and the move to review_ready
     (only from assessing or no_draft, as a saved draft does) are written together. Refused, writing nothing,
-    for a hand-off that isn't waiting or already has a draft, so it can't revive a stopped hand-off or hide
-    a draft. True only when the marker is new."""
+    for a hand-off that isn't being assessed or already has a draft, so it can't revive a stopped hand-off
+    or hide a draft. True only when the marker is new."""
     db.execute("BEGIN IMMEDIATE")
     try:
         h = handoff(db, hid)
-        if h["status"] not in WAITING or latest_draft(db, hid):
+        if h["status"] not in ("assessing", "no_draft") or latest_draft(db, hid):
             db.execute("ROLLBACK")
             return False
         new = db.execute("INSERT OR IGNORE INTO no_reply_marks (handoff_id, created) VALUES (?, ?)",
