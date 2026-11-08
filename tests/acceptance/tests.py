@@ -1,6 +1,7 @@
-"""Acceptance tests 1-11 (DESIGN.md). Each returns a list of evidence strings or raises Failed."""
+"""Acceptance tests (DESIGN.md). Each returns a list of evidence strings or raises Failed."""
 import json
 import os
+import pathlib
 import random
 import signal
 import subprocess
@@ -10,7 +11,9 @@ from harness import (CODEX_HOME, RELAY, REPO, Failed, check, choose, claude_say,
                      drafts, events, feedback_entries, handoffs, human_look, inject_draft, keys, kill_session, latest,
                      log, menu_options, notifications, pane_pid, pid_alive, q, rollout, screen, session_handoff, sh,
                      thread_id, thread_turns, tmux, trust_claude_folder, turn_of, type_line, wait_handoff, wait_menu,
-                     wait_until, ask_codex, ask_menu)
+                     wait_until, ask_codex, ask_menu, codex_idle)
+
+from ccrelay import store  # noqa: E402
 
 TAG = os.environ.get("RUN_TAG", time.strftime("%H%M%S"))
 
@@ -706,9 +709,184 @@ def t20_review_once_creates_conversation():
                  f"{h['created'] - created:.1f}s after creation"]
 
 
+def agent_text(turn):
+    """What Codex said in a turn: the text of its agent-message items."""
+    out = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if str(node.get("type", "")).lower().replace("_", "") == "agentmessage" and isinstance(node.get("text"), str):
+                out.append(node["text"])
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+    walk(turn)
+    return "\n".join(out)
+
+
+def t21_copied_draft():
+    """#2: a copied draft of 8 KB or more, made by Codex's real propose_reply call (copy "all" plus additions),
+    reaches real Claude byte-identical. The stored report is replaced by a known text so its size and bytes are
+    fixed; everything after that is the real path."""
+    import re
+    label = f"T21-{TAG}"
+    # Not first_review: a turn can be filed more than once (two Stop hooks in a stale test configuration), and the
+    # newest report then waits behind the first one's menu. Any report with a menu pending will do.
+    claude_start("cc21", label)
+    claude_say("cc21", "Reply with just: READY")
+    wait_until(lambda: [x for x in handoffs(label) if x["status"] == "review_ready"], 300, "a report ready for review")
+    codex_open("cx21", label)
+    report = "".join(f"{i:03d} naïve café — 日本語 ✓ run `python3 -m unittest`  \t\r\n" for i in range(1, 140)) \
+        + "final line without a newline"
+    additions = "Reviewer notes: T21-ADDITIONS-OK"
+    check(len(report.encode()) >= 8192, f"the report is {len(report.encode())} bytes (>= 8 KB)")
+    # A turn can file more than one report; Discuss each menu until Codex has nothing queued, then target the
+    # report whose menu was open last.
+    target = None
+    for _ in range(4):
+        wait_menu("cx21")
+        target = int(re.search(r"Answering report H(\d+)", screen("cx21")).group(1))
+        choose("cx21", "Discuss")
+        time.sleep(4)  # the answered menu leaves the screen
+        settled = [0]
+
+        def quiet():
+            menu = menu_options("cx21")
+            if menu:
+                return "menu"
+            settled[0] = settled[0] + 1 if codex_idle(label) else 0
+            return "idle" if settled[0] >= 10 else None
+        if wait_until(quiet, 120, "the next menu or an idle Codex", interval=1.0) == "idle":
+            break
+    h = q("SELECT * FROM handoffs WHERE id=?", target)[0]
+    conn = store.connect()
+    conn.execute("UPDATE handoffs SET claude_message=? WHERE id=?", (report, h["id"]))
+    ask_codex("cx21", f"Call the relay propose_reply tool now with handoff H{h['id']}, copy \"all\" and additions "
+                      f"\"{additions}\". Do not pass draft and do not retype the report.")
+    wait_menu("cx21")
+    d = latest_draft_of(h["id"])
+    expected = report + "\n\n" + additions  # the report has no final newline: two LFs
+    check(d["text"] == expected, f"the stored draft is the report plus the additions ({len(d['text'].encode())} bytes)")
+    check(open(d["path"], "rb").read() == expected.encode("utf-8"), "the draft file's bytes equal the stored text as UTF-8")
+    choose("cx21", "Send")
+    wait_until(lambda: q("SELECT status FROM drafts WHERE id=?", d["id"])[0]["status"] == "sent", 60, "draft sent")
+    got = wait_until(lambda: feedback_entries(h["transcript_path"]), 60, "feedback in Claude transcript")
+    check(got[-1] == expected, "Claude's transcript text is byte-identical to the stored draft")
+    wait_until(lambda: 'McpToolCall' in rollout(thread_id(label)) and 'T21-ADDITIONS-OK' in rollout(thread_id(label)), 60, 'the call in the rollout')
+    shapes = []
+    for line in rollout(thread_id(label)).splitlines():
+        try:
+            item = ((json.loads(line).get("payload") or {}).get("item") or {})
+        except json.JSONDecodeError:
+            continue
+        if item.get("type") == "McpToolCall" and item.get("tool") == "propose_reply" and "copy" in (item.get("arguments") or {}):
+            shapes.append(json.dumps(item["arguments"], ensure_ascii=False))
+    check(shapes, "Codex's rollout records a propose_reply call carrying copy")
+    return [f"copied draft D{d['id']} ({len(expected.encode())} bytes, CRLF and non-ASCII) made by Codex's real "
+            "propose_reply call and delivered byte-identical to real Claude, confirmed in its transcript",
+            f"propose_reply arguments as Codex sent them: {shapes}"]
+
+
+def latest_draft_of(hid):
+    conn = store.connect()
+    return store.latest_draft(conn, hid)
+
+
+OLD_RELAY_COMMIT = "5e35232"  # the last commit before the copy path and the isolation guidance
+
+
+def developer_text(tid):
+    """The developer messages the conversation's rollout records (its instructions), not the questions put to it."""
+    out = []
+    for line in rollout(tid).splitlines():
+        try:
+            payload = json.loads(line).get("payload") or {}
+        except json.JSONDecodeError:
+            continue
+        if payload.get("type") == "message" and payload.get("role") == "developer":
+            out.append(json.dumps(payload.get("content"), ensure_ascii=False))
+    return "\n".join(out)
+
+
+def tool_server_pids():
+    """Process IDs of the development relay's tool server(s) the development Codex daemon started."""
+    from harness import RELAY_HOME
+    found = subprocess.run(["pgrep", "-f", f"{RELAY} mcp"], capture_output=True, text=True).stdout.split()
+    return sorted(int(p) for p in found if f"RELAY_HOME={RELAY_HOME}" in pathlib.Path(f"/proc/{p}/environ").read_bytes().decode(errors="replace").replace("\0", "\n"))
+
+
+def t22_refresh_existing_conversation():
+    """#2: what an existing conversation picks up, and after which action. The conversation is created with the
+    previous commit's operating instructions; the relay then runs the current ones. The relay tools are hidden
+    after the conversation is first used (the same switch test 11 uses), which shows when Codex asks the running
+    tool server for its tool list again. Each probe is a question Codex answers without calling a tool."""
+    import re
+    from ccrelay import codexrpc, intake
+    from harness import RELAY_HOME, stop_daemon
+    label = f"T22-{TAG}"
+    old = subprocess.run(["git", "show", f"{OLD_RELAY_COMMIT}:ccrelay/ops_instructions.md"], cwd=os.path.dirname(RELAY),
+                         capture_output=True, text=True, check=True).stdout
+    check("Sessions are isolated" not in old, "the previous operating instructions have no isolation guidance")
+    current = intake.OPS_INSTRUCTIONS
+    check("Sessions are isolated" in current, "the current operating instructions have it")
+    cfg, conn = store.load_config(), store.connect()
+    intake.OPS_INSTRUCTIONS = old
+    try:
+        tid = intake.ensure_thread(conn, cfg, label, str(REPO))
+    finally:
+        intake.OPS_INSTRUCTIONS = current
+    check("Sessions are isolated" not in developer_text(tid), f"conversation {tid} was created with the old instructions")
+    question = ("Do not call any relay tool. A1: does your operating (developer) instruction text contain a section "
+                "titled 'Sessions are isolated'? A2: use your exec tool once to inspect ALL_TOOLS (for example "
+                "ALL_TOOLS.filter(x => /propose_reply/.test(x.name)) and the property names of its input schema) "
+                "and say whether a propose_reply tool is listed. A3: if it is, does its input schema have a "
+                "property named copy? Reply with exactly one line: A1=<yes or no> A2=<yes or no> A3=<yes or no or na>")
+    n, pids = [0], []
+
+    def probe(after):
+        n[0] += 1
+        codexrpc.ensure_daemon(cfg)
+        codexrpc.ensure_loaded(cfg, tid)
+        turns = len(thread_turns(tid))
+        codexrpc.queue_message(cfg, tid, question, f"t22-probe-{n[0]}")
+        wait_until(lambda: len(thread_turns(tid)) > turns and codex_idle(label), 240, f"probe {n[0]} answered")
+        said = agent_text(thread_turns(tid)[-1])
+        m = re.search(r"A1=(yes|no)\s+A2=(yes|no)\s+A3=(yes|no|na)", said, re.I)
+        check(m, f"probe {n[0]} ({after}) answered in the asked form: {said[:200]!r}")
+        a1, a2, a3 = (g.lower() for g in m.groups())
+        log(f"  probe after {after}: instructions have the isolation section={a1}; propose_reply available={a2}; "
+            f"accepts copy={a3}")
+        pids.append(f"{n[0]}={tool_server_pids()}")
+        return f"after {after}: A1 instructions-have-isolation-section={a1}, A2 propose_reply-available={a2}, A3 accepts-copy={a3}"
+
+    results = [probe("creation, tools served by the current code")]
+    (RELAY_HOME / "test-hide-tools").touch()
+    try:
+        results.append(probe("the tool server now hides its tools, next turn in the same loaded conversation"))
+        codex_open("cx22", label)
+        time.sleep(15)  # let the window finish attaching
+        results.append(probe("reopening the conversation in a Codex window"))
+        kill_session("cx22")
+        stop_daemon()
+        results.append(probe("restarting the Codex daemon"))
+    finally:
+        (RELAY_HOME / "test-hide-tools").unlink()
+    results.append(probe("the tools served again, next turn without a restart"))
+    stop_daemon()
+    results.append(probe("restarting the Codex daemon again, tools served"))
+    check("Sessions are isolated" not in developer_text(tid),
+          "the conversation's recorded instructions still lack the isolation section after every action")
+    results.append("the tool server's process ids at each probe: " + "; ".join(pids))
+    return results
+
+
 ALL = [t01_exact_text, t02_correct_session, t03_instruction, t04_no_duplicates, t05_visible_failure,
        t06_esc, t07_open_window_cycle, t08_menu_survival, t09_escalation, t10_loaded_guard, t11_no_draft,
        e1_claude_killed, e2_consecutive_sends, t14_queued_behind_menu, t15_same_ticket, t16_standing_context,
-       t17_permission, t18_long_labels, t19_link_creates_conversation, t20_review_once_creates_conversation]
+       t17_permission, t18_long_labels, t19_link_creates_conversation, t20_review_once_creates_conversation,
+       t21_copied_draft, t22_refresh_existing_conversation]
 # 12 = E1, 13 = E2 (extra checks; design test 12 is the dev-box check). 14-18 are the cross-session checks of #8.
 # 19-20 check #9: the conversation is created by /relay-link and /relay-review.
+# 21-22 check #2: a copied draft of 8 KB or more delivered byte-exact, and what refreshes an existing conversation.

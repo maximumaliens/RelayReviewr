@@ -130,8 +130,16 @@ Claude Code shows a delivered draft as **"Stop hook error: …"**. That's Claude
 - A **persona** is your instructions for the reviewer: its role, tone and house rules. It's a text file. You set one per project in `config.json` under `personas`, keyed by the project's main folder. A generic example is in [`persona/example.md`](persona/example.md); copy it somewhere of your own and edit it.
 - **Standing context** is a note about the project's current state that Codex should know, kept in the project's main folder as `.scratch/codex-handover.md`. The first report in a new conversation carries it, and it's sent again whenever the file changes. If the file is missing or empty, nothing is sent. Only Codex sees it.
 - A conversation keeps the persona it was created with. Changing a persona file affects new conversations only; for an existing ticket, use a new label to start fresh.
-- The relay also gives Codex its own operating instructions (draft a complete instruction, call the menu, stay read-only, never claim you answered a prompt). They're kept separate from your persona.
+- The relay also gives Codex its own operating instructions (draft a complete instruction or have the relay copy a stored report, keep each delivered instruction standalone because sessions are isolated, call the menu, stay read-only, never claim you answered a prompt). They're kept separate from your persona.
 - Codex reviews read-only: it can read your project but can't change it.
+
+### After you update the relay: what an existing conversation picks up
+
+The relay's tool server and the reviewer's operating instructions are updated by different routes. Acceptance test 22 checked each against a conversation created with the previous version's instructions.
+
+- **Tool descriptions and the `propose_reply` schema.** Codex starts the relay's tool server once and keeps it, so an existing conversation doesn't see changes on its next turn. Reopening the conversation in a Codex window (`relay review <ticket>`, then give it a few seconds to attach) or restarting the Codex daemon starts a new tool server, and the conversation lists the new tools from then on. Both worked in the test; the next turn alone did not.
+- **Operating instructions.** They are given to Codex only when the conversation is created. A new turn, reopening the window and restarting the daemon all left an existing conversation with the instructions it was created with, so there is **no tested way to update them for an existing conversation** (unresolved: the relay doesn't pass instructions on resume yet). A new ticket label starts a conversation that has the current ones.
+- **What reaches an existing conversation anyway.** Each report's header is written by the relay's hook when the report is filed, and it now says: give either a draft or a copy, never both, and the delivered text must stand alone. That wording is checked in the unit tests. Whether an existing conversation acts on it, without the full instructions, was not tested.
 
 ## Notifications
 
