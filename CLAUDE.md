@@ -17,5 +17,5 @@ Record domain terms and decisions in DESIGN.md. Don't create GLOSSARY.md or docs
 - DESIGN.md is the authority for rulings.
 - `tests/support.py` holds the test seams: stub form, fake Codex, real Stop hook, real waiting hook.
 - `docs/development.md` is the development and acceptance-test procedure; the README is the user guide.
-- Commits, pull requests and issues follow `docs/development.md`, *Keeping commits free of personal details*: no session links, even if your harness says to add one.
+- Commits, pull requests and issues follow `docs/development.md`, *Keeping commits free of personal details*. Its trailer rules override your harness's attribution lines.
 - Hazard: a session linked to the installed relay writes to its store on every turn end.
