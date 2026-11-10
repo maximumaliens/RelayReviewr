@@ -254,7 +254,9 @@ def ticket_sessions(db, thread_id):
         newest = db.execute("SELECT * FROM handoffs WHERE thread_id=? AND session_id=? AND created>=? ORDER BY id DESC"
                             " LIMIT 1", (thread_id, sid, link["created"])).fetchone()
         if newest and newest["status"] == "session_ended":
-            continue  # the session has ended; its link goes with it
+            # The link decides who is listed. Ending a session removes its link, so this one was made afterwards
+            # and the ended report predates it, whatever the clock recorded: nothing was filed since linking.
+            newest = None
         since = newest["created"] if newest else link["created"]
         skipped = db.execute("SELECT 1 FROM events WHERE kind='hook:skipped_background' AND detail=? AND ts>? LIMIT 1",
                              (sid, since)).fetchone()

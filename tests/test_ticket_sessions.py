@@ -1,13 +1,14 @@
 """Who is on the ticket (#4): the menu, the tool results and the hand-off header list every linked session of the
 same project and ticket label with its state, and a session that can't receive gets Copy with the reason. Links,
 reports and skipped turns are made by the real commands and the real Stop hook against a fake Codex."""
+import io
 import itertools
 import json
 import os
 from unittest import mock
 
 from support import RelayCase, StubServer, git
-from ccrelay import cli, mcp_server, store
+from ccrelay import claude_hooks, cli, mcp_server, store
 
 VERIFIER, BUILDER, TESTER = "aaaaaa1111111111", "bbbbbb2222222222", "cccccc3333333333"
 
@@ -152,6 +153,17 @@ class StatesOfASessionThatIsNotHeld(Ticket):
         self.stopped("released", "Esc")
         self.assertEqual(self.builder_line(), "- builder: not waiting (released: Esc); Copy only",
                          "until it finishes a turn")
+
+    def test_a_current_link_is_listed_even_when_the_clock_dates_an_old_ended_report_after_it(self):
+        old = self.report(BUILDER)
+        with self.codex.installed(), mock.patch("sys.stdin", io.StringIO(json.dumps({"session_id": BUILDER}))):
+            claude_hooks.session_end()  # the real SessionEnd hook: the report ends and the link goes
+        self.assertEqual(store.handoff(self.db, old["id"])["status"], "session_ended")
+        self.link(BUILDER, "builder")  # the session was resumed and linked again
+        linked = self.db.execute("SELECT created FROM links WHERE session_id=?", (BUILDER,)).fetchone()["created"]
+        # The wall clock moved backwards in between, so the ended report carries a later time than the new link.
+        self.db.execute("UPDATE handoffs SET created=?, updated=? WHERE id=?", (linked + 60, linked + 60, old["id"]))
+        self.assertEqual(self.builder_line(), "- builder: not waiting (no turn finished since linking); Copy only")
 
     def test_an_unlinked_session_is_no_longer_listed(self):
         self.stopped("released", "Esc")

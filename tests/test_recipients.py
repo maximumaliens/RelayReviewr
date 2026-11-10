@@ -183,8 +183,9 @@ class CopyForSessionsNotHeld(Recipients):
                                   ("writer", "4444444444", "timed_out"), ("gone", "5555555555", "session_ended")):
             hid = self.held(role, sid)
             self.db.execute("UPDATE handoffs SET status=? WHERE id=?", (status, hid))
-            self.db.execute("INSERT INTO links (session_id, label, cwd, created) VALUES (?, 'T-1', ?, 0)",
-                            (sid, str(self.root)))
+            if status != "session_ended":  # ending a session removes its link, so it is no longer on the ticket
+                self.db.execute("INSERT INTO links (session_id, label, cwd, created) VALUES (?, 'T-1', ?, 0)",
+                                (sid, str(self.root)))
         self.draft(ver)
         srv, _ = self.menu(ver)
         self.assertEqual(srv.forms[0]["choices"],
