@@ -4,11 +4,12 @@ Notable changes to the relay. Releases before this file are described on the Git
 
 ## Unreleased
 
+## v0.2.0 (2026-11-11)
+
 ### Added
 - **Copied drafts (#2).** `propose_reply` can take `copy` (the whole stored report, or ascending line selections from it) with optional `additions`, instead of free-text `draft`. The relay copies the text itself, so a report is passed on exactly. Invalid combinations are rejected before anything is saved or shown. The menu shows where the copied text came from, and a marked preview for long copied drafts.
 - **Isolation guidance (#2).** The reviewer's operating instructions, the `propose_reply` description and each report's header say that sessions are isolated, that a delivered instruction must stand alone, and how to pass on a builder's closeout or a verifier's corrective.
-- **No-reply menu (#3).** Codex can call `no_reply_menu` when Claude needs no instruction, so it doesn't draft an acknowledgement that would start another round. The menu offers Discuss, Keep waiting and Finish without sending, recommends Finish, and never sends anything by itself. The no-draft notice doesn't fire for it.
-
+- **No-reply menu (#3).** Codex can call `no_reply_menu` when Claude needs no instruction, so it doesn't draft an acknowledgement that would start another round. The menu offers Discuss, Keep waiting and Finish without sending, recommends Finish, and never sends anything by itself. You get a "review ready — no reply needed" notification, and the no-draft notice doesn't fire for it.
 - **Who is on the ticket (#4).** The menu lists every session linked to the ticket in the same project, including one that hasn't reported yet, with the reason it can't be sent to: busy, last turn skipped because background work was running, no turn finished since linking, or released, timed out, finished or failed. Each such session gets Copy for …. Codex gets the same list in each report's header and after each `propose_reply` and `show_menu` result.
 - **Copy to clipboard on every menu for a draft (#4),** including after the draft went to another session. That menu still says where the draft went, and copying leaves the delivery record as it is.
 - **Copy-only drafts for a finished report (#4).** After Finish, Codex can still prepare a draft for that report with `propose_reply`. Its menu offers Copy and Discuss only; nothing can be sent for it, and the report stays finished.
