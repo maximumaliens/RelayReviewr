@@ -17,6 +17,7 @@ The relay is a small Python program (standard library only). The design notes an
 - **Held session:** a session that has finished a reply and is waiting for your decision (a linked session, or one you used `/relay-review` in). Claude shows *"running Stop hooks…"* while it's held.
 - **Draft** (numbered `D1`, `D2` …): the next instruction Codex suggests for Claude.
 - **Menu:** the list of choices Codex shows you for a draft: Send, Copy, Discuss, Keep waiting or Finish.
+- **Note:** an optional line from Codex to you, shown in the menu above the draft. It's never sent to Claude and is no part of the draft.
 - **Source session:** the session whose report a draft answers.
 - **Recipient:** the session you choose to Send a draft to. It's usually the source session, but it can be another session on the same ticket.
 - **Role:** an optional name for a session, such as `implementer` or `verifier`, set with `--as`.
@@ -88,16 +89,31 @@ To review just one reply, type `/relay-review issue-42` (it also takes `--as`). 
 | Choice | What it does | When to use it |
 |---|---|---|
 | **Send to <session>** | That session receives the draft exactly as shown and carries on. When it next finishes, its new report appears in the same conversation. | The draft is right. |
-| **Copy for <session>** | Puts the draft on the clipboard for a session that isn't held (busy, released or past the 4-hour limit). Nothing is sent; paste it yourself. | The session you want can't receive right now. |
+| **Copy for <session>** | Puts the draft on the clipboard for a linked session that can't be sent it. The menu's session list says why. Nothing is sent; paste it into that session yourself. | The session you want can't receive right now. |
+| **Copy to clipboard** | Puts the draft on the clipboard. It's on every menu for a draft. Nothing is sent, and a copied draft isn't offered for Send afterwards, so it can't arrive twice; ask Codex for a new draft if you want one sent. | You want the text for anything else, or the session you mean isn't listed. |
 | **Discuss** (or Esc) | The menu closes and you talk with Codex normally. When Codex has a revised draft, the menu comes back. **Claude stays held** the whole time, so anything you type in Claude queues until Send, Finish or Esc. To answer Claude directly, choose **Finish** first (Codex will tell you, and can bring the menu back). | You want changes, or have questions. |
 | **Keep waiting** | The menu closes and Claude stays held. Ask Codex for "the menu" when you're ready. | You need a break or more time. |
 | **Finish without sending — release <session>** | Releases the source session with no reply. Other held sessions stay held. | Claude needs nothing more: for example, it only reported that it's done. |
 
 **When Claude needs nothing.** If a report only restates a decision request, acknowledges, or waits for you, Codex doesn't draft an acknowledgement (any reply would come back as another report). It says so and shows a **no-reply menu** with Discuss, Keep waiting and Finish without sending, never Send or Copy, and recommends Finish. Nothing is sent or finished until you choose. If Codex later drafts a reply for the same report, the normal menu returns. You get the usual "review ready" notification, worded "no reply needed".
 
-There's one Send option for each held session on the same project and ticket, with the source session first. The menu shows each one's folder, branch and commit, and when those were read. Codex may suggest a recipient; that's shown as text only and never changes which option is highlighted.
+There's one Send option for each held session on the same project and ticket, with the source session first. The menu shows each one's folder, branch and commit, and when those were read. Codex may suggest a recipient; that's shown as text only and never changes which option is highlighted. If Codex added a **note** for you (for example "Send this to builder once it's held"), the menu shows it above the draft, marked "never sent".
 
-If the source session is no longer held (you pressed Esc, it timed out, or it ended), Send isn't offered: you get **Copy to clipboard**, Discuss and Finish. After you've sent a draft to a different session, its menu offers Discuss, Keep waiting and Finish for the source session, which is still held.
+**Sessions on this ticket.** The menu lists every session linked to the ticket in the same project, the source first, including one that hasn't sent a report yet. A session that can't be sent the draft gets **Copy for <session>**, and the list gives the reason:
+
+| The list says | What it means |
+|---|---|
+| busy: it received an instruction and is working | You sent it something and it hasn't finished that turn. |
+| Last turn skipped because background work was running | Its last turn ended while Claude still had background tasks, so that turn wasn't sent for review and the session isn't held. |
+| no turn finished since linking | It has finished no turn since `/relay-link`. Give it a turn and it will be held. |
+| released, timed out, finished or failed, with the reason | It stopped waiting: you pressed Esc, the 4-hour limit passed, you chose Finish, or the review couldn't start. |
+| held … Send isn't offered | It is held, but this draft can't be sent: the draft's source session stopped waiting, or the draft was already sent or copied. |
+
+A session used only with `/relay-review` is listed while its report is held, and not afterwards. Codex gets the same list with every report and each time it shows you a draft's menu, so it knows who can receive.
+
+If the source session is no longer held (you pressed Esc, it timed out, or it ended), Send isn't offered to anyone, even if another session on the ticket is held: you get Copy for each listed session, **Copy to clipboard**, Discuss and Finish. After you've sent a draft to a different session, the menu for the source session, which is still held, says where the draft went and offers Copy to clipboard, Discuss, Keep waiting and Finish. Copying then doesn't change the record that the draft was delivered.
+
+**One more message after Finish.** A report you finished stays finished. If you then ask Codex for another message to that session, it can still prepare a draft for that report. That draft is Copy-only: its menu offers Copy for each listed session, Copy to clipboard and Discuss, and nothing can be sent for it. Ask Codex for "the menu" to see it again.
 
 ### Two or more sessions on one ticket
 
@@ -107,19 +123,24 @@ Link each session to the same label with its own role, for example an implemente
 
 Both report into the ticket's one conversation, so Codex sees the whole loop. When you Send, you choose who receives the draft. For example, send the verifier's findings straight to the implementer. If you send to a different session, the source session stays held, so you can send it something later or finish it.
 
+A session can only be sent a draft while it is held, which means it has finished a turn since you linked it. If the session you want isn't held, the menu lists it with the reason and offers Copy for it (see *Sessions on this ticket* above).
+
+**If Claude Code continues a session under a new session ID** (for example after you move it to the background), the link stays with the old ID and the continued session isn't reviewed. Run `/relay-link <label> --as <role>` again in the continued session. The old ID can stay in the menu's list until that session ends or is unlinked.
+
 Codex handles one thing at a time per conversation. A report that arrives while a menu is open waits behind it, and you get a notification such as "issue-42: verifier report H7 queued behind the open menu". The open menu is never redrawn, so a stray Enter can't send to the wrong session. The report isn't lost: it's assessed as soon as you answer the menu. Choosing **Discuss** lets the queued report go first, and you carry on the discussion afterwards. The menu also lists reports still waiting to be assessed.
 
 ### Checking what's going on
 
-`relay status` lists the last 20 reports: the ticket, the report's state, the session that sent it, and each draft's state and recipient. There's no command yet that lists linked sessions; `relay status` shows each session that has sent a report.
+`relay status` lists the last 20 reports: the ticket, the report's state, the session that sent it, and each draft's state and recipient. There's no command yet that lists linked sessions; `relay status` shows each session that has sent a report, and the menu for a draft lists the ticket's linked sessions.
 
 ## What decides whether a reply is reviewed, or a session can receive
 
 - **Only finished replies are sent.** A reply is sent for review when Claude finishes its turn. While Claude is asking you a question or waiting at a permission prompt, its turn hasn't finished: nothing is sent, and the session isn't held, so it can't receive a Send (Copy is offered instead). Answer Claude, and the reply it finishes next is sent.
-- **Background tasks:** if a turn ends while Claude still has background tasks running, that turn isn't sent. The next turn that ends without them is.
+- **Background tasks:** if a turn ends while Claude still has background tasks running, that turn isn't sent, and the session isn't held. The menu's session list says "Last turn skipped because background work was running". The next turn that ends without them is sent.
 - **Subagents:** replies from Claude's subagents are never sent; only the main session's reply is.
 - **A newer reply replaces an older one:** if a session sends a new report before you've decided on the last one, the older one is closed (superseded). Its draft can only be copied.
 - **The 4-hour limit:** a held session is released after 4 hours without a decision. The draft is kept, marked "timed out, not sent", and you can still copy it.
+- **A draft can be sent only while its source session is held.** Once the source stops waiting, the draft is Copy-only, even if another session on the ticket is held.
 - **Releasing Claude yourself:** pressing Esc in Claude, or closing its terminal, releases it. If that session is the source of an open menu, the menu is withdrawn and the draft isn't sent.
 - **Once a session receives an instruction,** any earlier draft written for its own reports is closed ("not sent: the session received D<n> instead").
 - **If a session ends** with a draft unsent, Codex is told and lists what still needs attention.
@@ -144,6 +165,8 @@ Claude Code shows a delivered draft as **"Stop hook error: …"**. That's Claude
 
 A new version adds a tool (`no_reply_menu`) and revises tool descriptions, which live in the tool server. Reopening the conversation in a Codex window (`relay review <ticket>`, then wait about 15 s for it to attach) or restarting the Codex daemon replaced the tool server in testing; in acceptance test 23 an existing conversation then listed the new tool, real Codex called it when asked, and a Discuss choice returned the revised guidance (one run, one Codex version; see DESIGN.md). Whether Codex chooses it unprompted wasn't tested. The guidance in the operating instructions about the no-reply path and Discuss keeping Claude held reaches only conversations created after the update; the short line in each report's header carries the no-reply hint to older ones. Update the relay when no session is held. The procedure doesn't refresh creation-time operating instructions.
 
+A later version adds the session list, the note and Copy-only drafts for a finished report. An existing conversation gets the session list in a report's header with its next report, because the relay's hook writes the header. The list after each menu, the `note` argument and the revised tool descriptions live in the tool server, so they need the same refresh: reopen the conversation's window and wait about 15 s, or restart the Codex daemon. Until then the old tool server shows the old menu, returns no list, rejects a finished report and ignores a note without saying so; it sends and finishes nothing by itself. The guidance in the operating instructions reaches only conversations created after the update; the short line in each report's header tells older ones to keep owner-facing text out of the draft. Acceptance test 25 checks this path; its result is in [docs/acceptance-results.md](docs/acceptance-results.md).
+
 This is what acceptance test 22 observed, with a conversation created from the previous version's instructions. It is a refresh investigation. It does not meet the requirement to update an existing conversation's operating instructions, which is still open.
 
 - **Tool descriptions and the `propose_reply` schema.** Codex starts the relay's tool server and keeps it. In the test, a next turn left the same server process in place. Reopening the conversation in a Codex window (`relay review <ticket>`) replaced the server process when the test waited 15 s for the window to attach, and so did restarting the Codex daemon. Codex's own answers about its tools then matched the new server (served or hidden). Those answers are model-reported; the process IDs are what was observed. In an earlier run, a probe made immediately after the window opened still showed the old tool list, so give the window time to attach. This was seen on one Codex version, in a handful of runs.
@@ -167,6 +190,8 @@ The relay notifies you when a review is ready, when a report is queued behind an
 | "assessment finished without a draft" | Open the conversation and ask Codex to draft a reply. |
 | "Assessment failed" | Codex couldn't start or confirm the review, and Claude was released. Check the reviewer Codex is signed in, then try again (for example with `/relay-review`). |
 | The menu says "Not sent: <session> stopped waiting …" | Nothing was sent. Use Copy for that session, Send to another held session, or Discuss. |
+| A linked session has no Send option | It isn't held. The menu's *Sessions on this ticket* list gives the reason; use Copy for it, or give it a turn so it is held. |
+| A session's replies stopped being reviewed after Claude Code continued it (for example in the background) | It has a new session ID. Run `/relay-link` again in it. |
 | The menu says the draft "might have reached Claude" | A send was interrupted. Check that Claude session before doing anything else; no Send of that draft is offered, so it can't arrive twice. |
 | "Claude hook incompatible" | Claude Code changed what it gives the Stop hook, and nothing was sent. Check for a relay update. |
 | `relay review` says no conversation, or lists several projects | Check the label's spelling, or run it from inside the project's folder. |

@@ -33,7 +33,7 @@ class Eligible(Recipients):
         self.draft(ver)
         srv, _ = self.menu(ver)
         self.assertEqual(srv.forms[0]["choices"],
-                         ["Send to verifier", "Send to implementer", "Discuss", "Keep waiting",
+                         ["Send to verifier", "Send to implementer", "Copy to clipboard", "Discuss", "Keep waiting",
                           "Finish without sending — release verifier"])
 
     def test_same_label_in_another_project_and_sessions_no_longer_waiting_are_not_offered(self):
@@ -66,8 +66,9 @@ class Delivery(Recipients):
         self.assertIsNone(ver_hook.poll(), "the source's hook is still waiting")
         self.assertEqual(store.handoff(self.db, ver)["status"], "review_ready")
         self.assertEqual(store.handoff(self.db, impl)["status"], "sent")
-        self.assertEqual(result, f"Sent D{d} to implementer (H{impl}). Verifier H{ver} is still waiting; "
-                                 f"use show_menu H{ver} to send it something or finish it.")
+        self.assertEqual(result.split("\n\n")[0],  # the ticket's session list follows (#4)
+                         f"Sent D{d} to implementer (H{impl}). Verifier H{ver} is still waiting; "
+                         f"use show_menu H{ver} to send it something or finish it.")
 
     def test_finish_releases_only_the_source(self):
         impl = self.held("implementer", "1111111111")
@@ -97,8 +98,8 @@ class RecipientGone(Recipients):
         self.assertTrue(again["message"].startswith(
             f"Not sent: implementer stopped waiting at {time.strftime('%H:%M', time.localtime(released_at))} "
             "(Claude released the wait (Esc or exit))"), again["message"])
-        self.assertEqual(again["choices"], ["Copy for implementer", "Send to verifier", "Discuss", "Keep waiting",
-                                            "Finish without sending — release verifier"])
+        self.assertEqual(again["choices"], ["Copy for implementer", "Send to verifier", "Copy to clipboard", "Discuss",
+                                            "Keep waiting", "Finish without sending — release verifier"])
         self.assertEqual(store.latest_draft(self.db, ver)["status"], "ready", f"D{d} was not sent or approved")
 
 
@@ -176,18 +177,20 @@ class MenuText(Recipients):
 
 class CopyForSessionsNotHeld(Recipients):
     def test_busy_released_or_timed_out_sessions_on_the_ticket_are_offered_copy(self):
+        self.conversation()
         ver = self.held("verifier", "2222222222")
         for role, sid, status in (("implementer", "1111111111", "sent"), ("tester", "3333333333", "released"),
                                   ("writer", "4444444444", "timed_out"), ("gone", "5555555555", "session_ended")):
             hid = self.held(role, sid)
             self.db.execute("UPDATE handoffs SET status=? WHERE id=?", (status, hid))
-            self.db.execute("INSERT INTO links (session_id, label, cwd, created) VALUES (?, 'T-1', ?, 0)",
-                            (sid, str(self.root)))
+            if status != "session_ended":  # ending a session removes its link, so it is no longer on the ticket
+                self.db.execute("INSERT INTO links (session_id, label, cwd, created) VALUES (?, 'T-1', ?, 0)",
+                                (sid, str(self.root)))
         self.draft(ver)
         srv, _ = self.menu(ver)
         self.assertEqual(srv.forms[0]["choices"],
                          ["Send to verifier", "Copy for implementer", "Copy for tester", "Copy for writer",
-                          "Discuss", "Keep waiting", "Finish without sending — release verifier"])
+                          "Copy to clipboard", "Discuss", "Keep waiting", "Finish without sending — release verifier"])
         self.assertIn("implementer: not waiting (busy", srv.forms[0]["message"])
 
 
@@ -223,7 +226,8 @@ class SourceAfterSendingElsewhere(Recipients):
         self.menu(ver, "Send to implementer")
         self.hook_output(impl_hook)
         srv, result = self.menu(ver, "Finish without sending")
-        self.assertEqual(srv.forms[0]["choices"], ["Discuss", "Keep waiting", "Finish without sending — release verifier"])
+        self.assertEqual(srv.forms[0]["choices"], ["Copy to clipboard", "Discuss", "Keep waiting",
+                                                   "Finish without sending — release verifier"])
         self.assertIn(f"D{d} was sent to implementer (H{impl})", srv.forms[0]["message"])
         self.assertIsNone(self.hook_output(ver_hook), "the verifier is released with nothing more sent")
         self.assertIn("released without a reply", result)
@@ -302,6 +306,7 @@ class ReviewFixes(Recipients):
         self.assertEqual(store.latest_draft(self.db, ver)["status"], "ready", f"D{d} was not approved")
 
     def test_copy_is_offered_only_to_sessions_still_linked_to_the_ticket_including_failed_ones(self):
+        self.conversation()
         ver = self.held("verifier", "2222222222")
         moved = self.held("moved-on", "3333333333")
         failed = self.held("failed", "4444444444")
@@ -312,5 +317,5 @@ class ReviewFixes(Recipients):
                             (sid, label, str(self.root)))
         self.draft(ver)
         srv, _ = self.menu(ver)
-        copies = [c for c in srv.forms[0]["choices"] if c.startswith("Copy")]
+        copies = [c for c in srv.forms[0]["choices"] if c.startswith("Copy for")]
         self.assertEqual(copies, ["Copy for failed"])

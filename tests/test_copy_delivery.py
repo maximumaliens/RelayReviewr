@@ -31,7 +31,8 @@ class CopiedDelivery(RelayCase):
     def test_hook_output_equals_the_stored_draft_which_equals_the_report_plus_additions(self):
         result, out = self.deliver()
         d = store.latest_draft(self.db, self.hid)
-        self.assertEqual(result, "Sent to Claude. Claude is working; its next output will arrive here automatically.")
+        self.assertEqual(result.split("\n\n")[0],  # the ticket's session list follows (#4)
+                         "Sent to Claude. Claude is working; its next output will arrive here automatically.")
         self.assertEqual(out, {"decision": "block", "reason": d["text"]})
         self.assertEqual(out["reason"], REPORT + "\n\n" + ADDITIONS)  # report has no final newline: two LFs
         self.assertEqual(d["status"], "sent")

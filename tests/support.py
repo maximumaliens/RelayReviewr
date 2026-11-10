@@ -31,13 +31,16 @@ class StubServer:
 
     def elicit(self, message, choices, abort=None):
         """The scripted choice is the first offered option that starts with it ("Send" picks the first Send
-        to …); an option that isn't offered is returned as given, as a stray answer would be."""
+        to …); an option that isn't offered is returned as given, as a stray answer would be. A scripted None
+        is the user pressing Esc: the real server returns None for a form that wasn't accepted."""
         self.forms.append({"message": message, "choices": list(choices)})
         if self.while_open and len(self.forms) == 1:
             self.while_open()
             if abort and abort():  # the real server polls this while the form is open
                 return mcp_server.ABORTED
         want = self.choices.pop(0) if self.choices else "Keep waiting"
+        if want is None:
+            return None
         return next((c for c in choices if c.startswith(want)), want)
 
 
@@ -119,6 +122,12 @@ class RelayCase(unittest.TestCase):
             " hook_pid, recipient_aware, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
             (session, label, thread, str(cwd or self.root), str(transcript or self.root / "t.jsonl"), report, status,
              hook_pid or os.getpid(), t, t)).lastrowid
+
+    def conversation(self):
+        """The conversation of self.handoff()'s default ticket, as /relay-link or the first hand-off records it:
+        links made in the test's folder under that label belong to it."""
+        self.db.execute("INSERT INTO threads (project, label, thread_id, cwd, created) VALUES (?, 'T-1', 'thread-1', ?, 0)",
+                        (store.project_of(str(self.root)), str(self.root)))
 
     def draft(self, hid, text="do the thing", status="ready"):
         t = store.now()

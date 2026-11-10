@@ -104,7 +104,7 @@ class PlainDrafts(CopyCase):
         hid = self.held()
         for args in ({}, {"draft": "  \n"}, {"draft": 5}):
             _, result = self.propose(hid, args)
-            self.assertEqual(result, "Relay error: propose_reply needs a non-empty draft.")
+            self.assertEqual(result.split("\n\n")[0], "Relay error: propose_reply needs a non-empty draft.")
         self.assertIsNone(self.draft_row(hid))
 
     def test_sent_handoff_still_refuses_either_kind(self):
@@ -167,7 +167,7 @@ class Rejections(CopyCase):
 
     def test_other_conversation_and_closed_handoffs_are_still_rejected(self):
         other = self.held(thread="thread-2")
-        closed = self.held(status="finished")
+        closed = self.held(status="superseded")  # a finished one takes a Copy-only draft since #4
         for hid in (other, closed):
             _, result = self.propose(hid, {"copy": "all"})
             self.assertTrue(result.startswith("Rejected:"), result)

@@ -174,7 +174,7 @@ def connect():
                                 ("handoffs", "display_name", "TEXT"), ("handoffs", "branch", "TEXT"),
                                 ("handoffs", "head", "TEXT"), ("drafts", "recipient_handoff_id", "INTEGER"),
                                 ("handoffs", "recipient_aware", "INTEGER"), ("links", "once_label", "TEXT"),
-                                ("links", "once_role", "TEXT")):
+                                ("links", "once_role", "TEXT"), ("drafts", "note", "TEXT")):
         if column not in {r["name"] for r in db.execute(f"PRAGMA table_info({table})")}:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
     return db
@@ -204,6 +204,74 @@ def about(db, h):
 def where(h):
     """Where a session was when it filed hand-off `h`: folder · branch · HEAD, as far as known."""
     return " · ".join(p for p in (h["cwd"], h["branch"] and f"branch {h['branch']}", h["head"] and f"HEAD {h['head']}") if p)
+
+
+def unique_names(sessions, taken=()):
+    """Names by session ID for (session ID, name) pairs; two sessions with the same name are told apart by short
+    session ID, and so is one whose name is among `taken`, the names other sessions already go by. A session
+    given twice keeps its first name."""
+    base = {}
+    for sid, name in sessions:
+        base.setdefault(sid, name)
+    shared = {n for n in base.values() if list(base.values()).count(n) > 1} | set(taken)
+    return {sid: f"{n} ({sid[:6]})" if n in shared else n for sid, n in base.items()}
+
+
+# How a report that stopped waiting is worded in a session's state; any other status is shown as recorded.
+STOPPED = {"sent": "busy", "released": "released", "timed_out": "timed out", "finished": "finished", "failed": "failed"}
+BUSY = "it received an instruction and is working"
+SKIPPED = "Last turn skipped because background work was running"
+NO_TURN = "no turn finished since linking"
+
+
+def ticket_sessions(db, thread_id):
+    """The sessions on a conversation's ticket, as recorded: the one list behind the hand-off header, the tool
+    results and the menu (#4). First each held session (a linked one, or a one-off review's while its report is
+    held), in the order they reported. Then every other linked session: an ongoing link (/relay-link) whose label
+    is the conversation's and whose folder is in the conversation's project, in the order they linked. The label
+    alone never connects two projects, and a one-off review adds no entry of its own.
+
+    Each entry is a dict: session_id, name (unique in the list), base (the name before a short session ID was
+    added to tell it apart), held, handoff (the held report; else the newest report since the session's current
+    link, or None) and state, the words shown for a session that isn't held.
+    Only reports and skipped turns since the current link count, so linking again starts from "no turn finished
+    since linking"."""
+    waiting = db.execute(f"SELECT * FROM handoffs WHERE thread_id=? AND status IN ({','.join('?' * len(WAITING))})"
+                         " ORDER BY id", (thread_id, *WAITING)).fetchall()
+    held = {r["session_id"]: r for r in waiting}  # a session's newest held report
+    entries = [{"session_id": sid, "base": session_name(r), "held": True, "handoff": r, "state": "held"}
+               for sid, r in sorted(held.items(), key=lambda kv: kv[1]["id"])]
+    thread = db.execute("SELECT * FROM threads WHERE thread_id=?", (thread_id,)).fetchone()
+    links = db.execute("SELECT * FROM links WHERE label=? AND once=0 ORDER BY created, session_id",
+                       (thread["label"],)).fetchall() if thread else []
+    projects = {}
+    for link in links:
+        sid = link["session_id"]
+        if link["cwd"] not in projects:  # one git call per folder
+            projects[link["cwd"]] = project_of(link["cwd"])
+        if sid in held or projects[link["cwd"]] != thread["project"]:
+            continue
+        newest = db.execute("SELECT * FROM handoffs WHERE thread_id=? AND session_id=? AND created>=? ORDER BY id DESC"
+                            " LIMIT 1", (thread_id, sid, link["created"])).fetchone()
+        if newest and newest["status"] == "session_ended":
+            # The link decides who is listed. Ending a session removes its link, so this one was made afterwards
+            # and the ended report predates it, whatever the clock recorded: nothing was filed since linking.
+            newest = None
+        since = newest["created"] if newest else link["created"]
+        skipped = db.execute("SELECT 1 FROM events WHERE kind='hook:skipped_background' AND detail=? AND ts>? LIMIT 1",
+                             (sid, since)).fetchone()
+        if skipped:
+            state = SKIPPED
+        elif not newest:
+            state = NO_TURN
+        else:
+            word = STOPPED.get(newest["status"], newest["status"])
+            reason = BUSY if newest["status"] == "sent" else newest["reason"]
+            state = f"{word}: {reason}" if reason else word
+        entries.append({"session_id": sid, "base": session_name(newest) if newest else
+                        display_name(link["role"], link["cwd"], sid), "held": False, "handoff": newest, "state": state})
+    names = unique_names((e["session_id"], e["base"]) for e in entries)
+    return [{**e, "name": names[e["session_id"]]} for e in entries]
 
 
 def addressed_to(db, hid, status):

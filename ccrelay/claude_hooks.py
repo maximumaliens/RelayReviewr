@@ -79,6 +79,57 @@ def pid_alive(pid):
         return True
 
 
+def resolve_stale(db, h):
+    """Bring the record in line with reality when this session's waiting hook has gone away, including a send
+    to it that was interrupted: its transcript decides whether that draft arrived."""
+    if h["status"] in store.WAITING and not pid_alive(h["hook_pid"]):
+        store.set_handoff(db, h["id"], "released", "Claude is no longer waiting (Esc, exit or hook stopped)",
+                          only_from=store.WAITING)
+    if not pid_alive(h["hook_pid"]):
+        for d in store.addressed_to(db, h["id"], "sending"):
+            if transcript_has_feedback(h["transcript_path"], d["text"]):
+                store.delivered(db, d["id"], h["id"], "confirmed in Claude's transcript")
+            else:
+                store.set_draft(db, d["id"], "unknown", "hook stopped mid-send; not found in Claude's transcript",
+                                only_from=("sending",))
+    return store.handoff(db, h["id"])
+
+
+def ticket_sessions(db, thread_id):
+    """The sessions on a conversation's ticket (store.ticket_sessions), once every report recorded as held there
+    has been checked against its hook, so a session whose hook has gone isn't listed as held."""
+    for r in db.execute(f"SELECT * FROM handoffs WHERE thread_id=? AND status IN ({','.join('?' * len(store.WAITING))})",
+                        (thread_id, *store.WAITING)).fetchall():
+        resolve_stale(db, r)
+    return store.ticket_sessions(db, thread_id)
+
+
+def session_line(e, name=None):
+    """One session of the ticket as Codex and the menu are told it, from its store.ticket_sessions entry."""
+    name = name or e["name"]
+    return f"- {name}: held (H{e['handoff']['id']})" if e["held"] else f"- {name}: not waiting ({e['state']}); Copy only"
+
+
+SESSIONS_HEADING = "Sessions on this ticket (Send reaches only a held session; for any other, the owner gets Copy):"
+
+
+def sessions_text(db, thread_id):
+    """The ticket's sessions as Codex is told them, in each hand-off header and after each propose_reply and
+    show_menu result. It is information only: a failure to build it gives no list and is logged if it can be,
+    so it never stops a report being filed or hides a tool's result."""
+    try:
+        entries = ticket_sessions(db, thread_id)
+    except Exception as e:  # any failure: the list is never worth a lost report or result
+        try:
+            store.event(db, "sessions:list_failed", str(e))
+        except Exception:  # the store itself is failing; whatever comes next will say so
+            pass
+        return ""
+    if not entries:
+        return "Sessions on this ticket: none is held or linked."
+    return "\n".join([SESSIONS_HEADING, *(session_line(e) for e in entries)])
+
+
 def claude_process_pid():
     """Pid of the Claude Code process running this hook (CLAUDE_PID, else the nearest `claude` ancestor)."""
     env_pid = os.environ.get("CLAUDE_PID")
@@ -164,7 +215,7 @@ def stop():
         thread_id = intake.ensure_thread(db, cfg, h["label"], home)
         db.execute("UPDATE handoffs SET thread_id=? WHERE id=?", (thread_id, hid))
         handover = intake.pending_handover(db, thread_id, home)
-        text = intake.handoff_text(h, handover, store.last_delivered(db, sid))
+        text = intake.handoff_text(h, handover, store.last_delivered(db, sid), sessions_text(db, thread_id))
         turn_running = codex_turn_running(cfg, thread_id)  # before queueing: this report may start a turn itself
         item = intake.queue(db, cfg, thread_id, text, f"relay-H{hid}")
         db.execute("UPDATE handoffs SET queue_item_id=? WHERE id=?", (item, hid))

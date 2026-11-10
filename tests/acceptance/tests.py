@@ -1091,14 +1091,171 @@ def t24_review_once_in_a_linked_session():
             "and role, in the same conversation"]
 
 
+PRE_SESSION_LIST_COMMIT = "1076072"  # the last commit before the session list and the note to the owner (#4)
+HELD = ("assessing", "review_ready", "no_draft")
+
+
+def t25_session_list_and_note_after_refresh():
+    """#4: in a conversation created before the upgrade, after the documented tool-server refresh, real Codex
+    calls propose_reply with a note; the menu shows the note and the ticket's session list; and a hand-off header
+    written after the upgrade carries the list. Two real Claude sessions are linked to the ticket: a verifier
+    that reports, and a builder that never finishes a turn. As in tests 22 and 23 the previous version's tool
+    server is stood in for by hiding the tools (the old code itself isn't run). Evidence is kept apart: [process]
+    tool-server pids; [recorded] the header and the tool result in the conversation, and its developer messages
+    (creation-time instructions are NOT refreshed: #2 stays unresolved); [store] the draft, its note and its
+    file; [menu] what the Codex window shows; [model-reported] Codex's reading of its tool list, which can only
+    make the verdict INCONCLUSIVE. No PASS without the menu and the recorded result of the call."""
+    import re
+    from ccrelay import codexrpc, intake
+    from harness import RELAY_HOME
+    label = f"T25-{TAG}"
+    old = subprocess.run(["git", "show", f"{PRE_SESSION_LIST_COMMIT}:ccrelay/ops_instructions.md"],
+                         cwd=os.path.dirname(RELAY), capture_output=True, text=True, check=True).stdout
+    check("Who is on the ticket" not in old and "Who is on the ticket" in intake.OPS_INSTRUCTIONS,
+          "only the current operating instructions describe the session list")
+    cfg, conn = store.load_config(), store.connect()
+    hide = RELAY_HOME / "test-hide-tools"
+    current = intake.OPS_INSTRUCTIONS
+    intake.OPS_INSTRUCTIONS = old
+    hide.touch()  # the tool server of the "previous version": no note argument, no session list
+    try:
+        tid = intake.ensure_thread(conn, cfg, label, str(REPO))
+    finally:
+        intake.OPS_INSTRUCTIONS = current
+    question = ("Do not call any relay tool. Use your exec tool once to inspect ALL_TOOLS (for example "
+                "ALL_TOOLS.filter(x => /propose_reply/.test(x.name)) and the property names of its input schema). "
+                "A1: is a propose_reply tool listed? A2: does its input schema have a property named note? "
+                "Reply with exactly one line: A1=<yes/no> A2=<yes/no/na>")
+    obs = []
+
+    def probe(action):
+        n = len(obs) + 1
+        codexrpc.ensure_daemon(cfg)
+        codexrpc.ensure_loaded(cfg, tid)
+        turns = len(thread_turns(tid))
+        codexrpc.queue_message(cfg, tid, question, f"t25-probe-{n}")
+        wait_until(lambda: len(thread_turns(tid)) > turns and codex_idle(label), 240, f"probe {n} answered")
+        said = agent_text(thread_turns(tid)[-1])
+        m = re.search(r"A1=(yes|no)\s+A2=(yes|no|na)", said, re.I)
+        pids = tool_server_pids()
+        check(len(pids) == 1, f"probe {n} ({action}): exactly one relay tool server is running: {pids}")
+        obs.append({"n": n, "action": action, "pid": pids[0],
+                    "answers": tuple(g.lower() for g in m.groups()) if m else None, "said": said[:120]})
+        log(f"  probe {n} after {action}: tool server pid {pids[0]}; model-reported {obs[-1]['answers']}")
+
+    try:
+        probe("creation, the previous version's tool server (tools hidden)")
+    finally:
+        hide.unlink()  # the upgrade: the next tool server takes a note and returns the session list
+    codex_open("cx25", label)
+    time.sleep(15)  # let the window finish attaching: the documented refresh
+    probe("the upgrade, then reopening the conversation in a Codex window and waiting 15 s")
+    check(obs[1]["pid"] != obs[0]["pid"], "[process] reopening the window after 15 s replaced the tool server")
+    try:
+        # Two real sessions on the ticket: the builder links and never finishes a turn; the verifier reports.
+        builder = claude_start("cc25b", label, role="builder")
+        verifier = claude_start("cc25v", label, role="verifier")
+        claude_say("cc25v", "Reply with just: T25-FINDINGS for the builder")
+        h = session_handoff(verifier, HELD, timeout=waiting("the verifier's hand-off", 150))
+        hid = h["id"]
+        check(not q("SELECT 1 FROM handoffs WHERE session_id=?", builder), "the builder has filed no report")
+        listed = [f"- verifier: held (H{hid})", "- builder: not waiting (no turn finished since linking); Copy only"]
+        i = wait_until(lambda: turn_of(thread_turns(tid), hid) is not None and turn_of(thread_turns(tid), hid) + 1,
+                       waiting("the hand-off's turn", 240), f"H{hid}'s turn in the conversation") - 1
+        header = json.dumps(thread_turns(tid)[i], ensure_ascii=False)
+        check("Sessions on this ticket" in header and all(line in header for line in listed),
+              f"[recorded] the hand-off header written after the upgrade lists both sessions: {listed}")
+        check("never in the draft" in header, "[recorded] the header line carries the owner-material guidance")
+        # Codex assesses the report itself first; whatever menu that brings is put aside with Discuss.
+        wait_until(lambda: menu_options("cx25") or codex_idle(label), waiting("Codex's own assessment", 240),
+                   "Codex's own assessment of the report")
+        if menu_options("cx25"):
+            choose("cx25", "Discuss")
+        note = "T25-NOTE paste this into builder once it is held"
+        for attempt in (1, 2):
+            ask_codex("cx25", f"Call the relay propose_reply tool now with handoff H{hid}, draft \"T25-DRAFT rerun "
+                              f"the checks\", recipient \"builder\" and note \"{note}\". Keep the note out of the "
+                              "draft, then wait for my choice.")
+            try:
+                wait_until(lambda: menu_options("cx25") and "T25-DRAFT" in screen("cx25"), 120,
+                           f"cx25 menu for the draft (ask {attempt})")
+                break
+            except Failed:
+                if menu_options("cx25"):
+                    choose("cx25", "Discuss")
+                wait_until(lambda: codex_idle(label), 180, "cx25 Codex idle")
+        opts = menu_options("cx25")
+        d = latest_draft_of(hid)
+        if not opts or not d or "T25-DRAFT" not in d["text"]:
+            return [f"INCONCLUSIVE: after two asks Codex never called propose_reply with the draft for H{hid}, so "
+                    "the note and the menu's session list were not exercised"]
+        if not d["note"]:
+            return [f"INCONCLUSIVE: Codex called propose_reply for H{hid} without a note (arguments are its own), "
+                    "so the note was not exercised"]
+        check(d["note"] == note, f"[store] the draft's note is the one Codex gave: {d['note']!r}")
+        check("T25-NOTE" not in d["text"] and b"T25-NOTE" not in open(d["path"], "rb").read()
+              and open(d["path"], "rb").read() == d["text"].encode("utf-8"),
+              f"[store] the note is in neither the draft text nor the draft file ({d['text']!r})")
+        shown = " ".join(screen("cx25").split())
+        check(f"Reviewer's note to you (never sent): {note}" in shown, "[menu] the menu shows the note")
+        check("Sessions on this ticket" in shown and "verifier (source)" in shown
+              and "builder: not waiting (no turn finished since linking); Copy only" in shown,
+              "[menu] the menu lists the held verifier and the builder with its reason")
+        labels = [o[0] for o in opts]
+        check(labels == ["Send to verifier", "Copy for builder", "Copy to clipboard", "Discuss", "Keep waiting",
+                         "Finish without sending — release verifier"], f"[menu] the options are {labels}")
+        check(next(o[1] for o in opts if o[0] == "Send to verifier"),
+              "[menu] the suggestion of builder left the first option highlighted")
+        choose("cx25", "Keep waiting")
+        wait_until(lambda: codex_idle(label), 180, "Codex idle after Keep waiting")
+        turn_text = json.dumps(thread_turns(tid)[-1], ensure_ascii=False)
+        if "The user is keeping Claude waiting" not in turn_text:
+            return [f"INCONCLUSIVE: the menu was shown and Keep waiting chosen, but the tool call's result wasn't "
+                    f"found in the conversation's last turn, so the returned session list wasn't observed (H{hid})"]
+        check("Sessions on this ticket" in turn_text and all(line in turn_text for line in listed),
+              "[recorded] the propose_reply result Codex received ends with the session list")
+        after = latest_draft_of(hid)
+        check(after["status"] == "ready" and store.handoff(conn, hid)["status"] in store.WAITING
+              and pid_alive(h["hook_pid"]), "[store] nothing was sent or finished: the draft is ready, the verifier held")
+        check("Who is on the ticket" not in developer_text(tid),
+              "[recorded] the conversation's developer messages never gained the new section")
+        notes = []
+        for o, want in zip(obs, [("no", "na"), ("yes", "yes")]):
+            if o["answers"] != want:
+                notes.append(f"probe {o['n']} ({o['action']}): Codex answered {o['answers'] or o['said']!r}, "
+                             f"expected {want} from the server process")
+        out = [f"[process] tool server pids by probe: {[o['pid'] for o in obs]}; replaced by reopening the window",
+               f"[recorded] H{hid}'s header, written after the upgrade, lists {listed} and carries the "
+               "owner-material line",
+               f"[menu] real Codex called propose_reply for H{hid} with a note; the menu showed the note, the "
+               f"session list and {labels}",
+               f"[store] D{d['id']}: note {d['note']!r} kept beside the draft, in neither its text nor its file; "
+               "nothing sent or finished",
+               "[recorded] the result Codex received after Keep waiting ends with the session list; the developer "
+               "messages lack the new section: creation-time instructions are not refreshed (#2 stays unresolved)",
+               "[model-reported] " + "; ".join(f"{o['n']}: {o['answers']}" for o in obs if o["answers"]),
+               "scope: the previous version's tool server is stood in for by hiding the tools; the call and its "
+               "arguments were requested by the harness's message to Codex. Whether Codex writes a note or names "
+               "another session unprompted isn't tested here, nor Copy (no clipboard check), a skipped turn, a "
+               "finished report or an older hook, which the unit checks cover."]
+        if notes:
+            out.append("INCONCLUSIVE: model-reported answers disagree with the process evidence: " + " | ".join(notes))
+        return out
+    finally:
+        for name in ("cx25", "cc25v", "cc25b"):
+            kill_session(name)
+
+
 ALL = [t01_exact_text, t02_correct_session, t03_instruction, t04_no_duplicates, t05_visible_failure,
        t06_esc, t07_open_window_cycle, t08_menu_survival, t09_escalation, t10_loaded_guard, t11_no_draft,
        e1_claude_killed, e2_consecutive_sends, t14_queued_behind_menu, t15_same_ticket, t16_standing_context,
        t17_permission, t18_long_labels, t19_link_creates_conversation, t20_review_once_creates_conversation,
        t21_copied_draft, t22_refresh_existing_conversation, t23_refresh_for_no_reply,
-       t24_review_once_in_a_linked_session]
+       t24_review_once_in_a_linked_session, t25_session_list_and_note_after_refresh]
 # 12 = E1, 13 = E2 (extra checks; design test 12 is the dev-box check). 14-18 are the cross-session checks of #8.
 # 19-20 check #9: the conversation is created by /relay-link and /relay-review.
 # 21-22 check #2: a copied draft of 8 KB or more delivered byte-exact, and what refreshes an existing conversation.
 # 23 checks #3: after the documented server refresh, an older conversation lists the no-reply tool.
 # 24 checks #5: /relay-review after /relay-link forwards the earlier reply and leaves the session linked.
+# 25 checks #4: after the documented server refresh, an older conversation's propose_reply takes a note and the menu,
+# the tool result and a new hand-off header list the ticket's sessions.

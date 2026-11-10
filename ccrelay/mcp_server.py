@@ -19,7 +19,8 @@ DISCUSS, KEEP, FINISH = "Discuss", "Keep waiting", "Finish without sending"
 COPY = "Copy to clipboard"
 ABORTED = object()
 # Closed hand-offs (DESIGN: Finish closes the handoff; a newer turn supersedes). Released, timed-out and
-# ended hand-offs stay open to the tools, because they leave the draft Copy-only rather than gone.
+# ended hand-offs stay open to the tools, because they leave the draft Copy-only rather than gone. A finished
+# one is open to propose_reply, and to show_menu once it has a draft, for a Copy-only draft (#4, amending Q8).
 CLOSED = ("superseded", "finished")
 
 HANDOFF_PROP = {"type": "string", "description": "The handoff your draft answers, e.g. H5, from the handoff "
@@ -42,7 +43,12 @@ TOOLS = [
                     "correction or concern under \"Reviewer notes\" in `additions`; with nothing to add, copy "
                     "alone. To send a verifier's findings to a builder, copy only the accepted builder-directed "
                     "instructions (leave out commentary and rejected or superseded instructions) and put your "
-                    "amendments in `additions`, with no conflicting requirements.",
+                    "amendments in `additions`, with no conflicting requirements. "
+                    "Anything for the owner (your assessment, the checks you ran, what you ask them to do) goes in "
+                    "`note` or in your chat reply, never in the draft. "
+                    "Each result ends with the sessions on this ticket and their state. Only a held session can be "
+                    "sent to; you may draft for a linked session that isn't held, and the owner then gets Copy. "
+                    "A handoff the owner finished takes a Copy-only draft: its menu offers Copy and Discuss.",
      "inputSchema": {"type": "object", "properties": {
          "draft": {"type": "string", "description": "Free text: the exact, complete prompt to send to Claude. "
                                                     "Not together with copy or additions."},
@@ -63,11 +69,17 @@ TOOLS = [
                                                         "text, e.g. \"Reviewer notes\" or \"Amendments\"."},
          "handoff": HANDOFF_PROP,
          "recipient": {"type": "string", "description": "Optional: the session you suggest should receive "
-                                                        "the draft. Shown to the user as text only."}},
+                                                        "the draft. Shown to the user as text only."},
+         "note": {"type": "string", "description": "Optional: one or two sentences for the owner saying what you "
+                                                   "ask them to do with this draft, e.g. \"Send this to builder "
+                                                   "once it's held\". Shown above the draft in the menu; never sent "
+                                                   "and never part of the draft."}},
          "required": ["handoff"]}},
     {"name": "show_menu",
      "description": "Show the user the review menu again for the draft on one handoff, or the no-reply menu "
-                    "again if you assessed that Claude needs no reply. Returns the user's choice. Discuss keeps "
+                    "again if you assessed that Claude needs no reply, or the Copy-only menu of a finished "
+                    "handoff that has a draft. Returns the user's choice, then the sessions on this ticket and "
+                    "their state. Discuss keeps "
                     "Claude held: if the owner wants to answer Claude directly, recommend Finish first and call "
                     "this so they can.",
      "inputSchema": {"type": "object", "properties": {"handoff": HANDOFF_PROP}, "required": ["handoff"]}},
@@ -164,8 +176,8 @@ def parse_handoff_ref(ref):
     return int(m.group(1)) if m else None
 
 
-def named_handoff(db, thread_id, ref):
-    """The hand-off Codex named, or (None, reason). Never the newest one by default."""
+def named_handoff(db, thread_id, ref, name):
+    """The hand-off Codex named in a call of the tool `name`, or (None, reason). Never the newest one by default."""
     hid = parse_handoff_ref(ref)
     if hid is None:
         return None, ("Rejected: name the handoff you are answering, e.g. handoff \"H5\" "
@@ -175,7 +187,9 @@ def named_handoff(db, thread_id, ref):
         why = "does not exist" if not h else "belongs to another conversation"
         return None, (f"Rejected: handoff H{hid} {why}. Use the H<n> from this conversation's handoff header. "
                       "Nothing was saved or shown.")
-    if h["status"] in CLOSED:
+    copy_only = h["status"] == "finished" and (
+        name == "propose_reply" or (name == "show_menu" and store.latest_draft(db, hid)))
+    if h["status"] in CLOSED and not copy_only:
         why = "a newer turn replaced it" if h["status"] == "superseded" else "it was finished without sending"
         return None, (f"Rejected: handoff H{hid} is closed ({h['status']}: {why}). "
                       "Answer a handoff that is still open. Nothing was saved or shown.")
@@ -189,7 +203,16 @@ def tool(server, name, args, thread_id):
         return "Relay error: this call carried no conversation id."
     if name not in ("propose_reply", "show_menu", "no_reply_menu"):
         return f"Relay error: unknown tool {name}"
-    h, rejection = named_handoff(db, thread_id, args.get("handoff"))
+    text = respond(server, db, cfg, name, args, thread_id)
+    # Codex is told who is on the ticket with every propose_reply and show_menu result, rejections included, as
+    # the sessions stand now. The no-reply menu's results stay as #3 defined them.
+    sessions = claude_hooks.sessions_text(db, thread_id) if name != "no_reply_menu" else ""
+    return f"{text}\n\n{sessions}" if sessions else text
+
+
+def respond(server, db, cfg, name, args, thread_id):
+    """Run one tool call and return what Codex is told about it."""
+    h, rejection = named_handoff(db, thread_id, args.get("handoff"), name)
     if rejection:
         return rejection
     # The whole tool call keeps Codex's turn open, so a report arriving at any point in it waits behind it (Q7).
@@ -207,7 +230,10 @@ def menu_call(server, db, cfg, name, args, h):
             return rejection
     if name == "propose_reply":
         draft, copy, additions = (args.get(k) for k in ("draft", "copy", "additions"))  # null = left out
-        parts = None
+        parts, note = None, args.get("note")
+        if note is not None and not isinstance(note, str):
+            return ("Rejected: note must be text: one or two sentences for the owner, or leave it out. "
+                    "Nothing was saved or shown.")
         if draft is not None and (copy is not None or additions is not None):
             return ("Rejected: give either draft (free text) or copy with optional additions, not both. "
                     "Nothing was saved or shown.")
@@ -225,7 +251,7 @@ def menu_call(server, db, cfg, name, args, h):
         if h["status"] == "sent":
             return (f"Not saved: handoff H{h['id']} is already {h['status']}. "
                     "Wait for Claude's next output before drafting.")
-        save_draft(db, cfg, h, draft, recipient, parts)
+        save_draft(db, cfg, h, draft, recipient, parts, (note or "").strip() or None)
     return menu(server, db, cfg, h["id"])
 
 
@@ -241,7 +267,7 @@ def record_no_reply(db, cfg, h):
                 f"menu: use show_menu H{h['id']}. The draft and the handoff are unchanged.")
     if store.no_reply(db, h["id"]):
         return None
-    h = resolve_stale(db, h)
+    h = claude_hooks.resolve_stale(db, h)
     if h["status"] not in store.WAITING or not store.mark_no_reply(db, h["id"]):
         h = store.handoff(db, h["id"])
         if store.no_reply(db, h["id"]):
@@ -256,15 +282,17 @@ def record_no_reply(db, cfg, h):
     return None
 
 
-def save_draft(db, cfg, h, text, recipient=None, parts=None):
+def save_draft(db, cfg, h, text, recipient=None, parts=None, note=None):
+    """Store a draft answering hand-off `h`, replacing its unsent one. `note` is Codex's note to the owner: kept
+    beside the draft for the menu, never in its text or its file."""
     first = store.latest_draft(db, h["id"]) is None
     db.execute("UPDATE drafts SET status='replaced', updated=? WHERE handoff_id=? AND status IN ('ready','failed')",
                (store.now(), h["id"]))
     drafts_dir = store.relay_home() / "drafts"
     drafts_dir.mkdir(exist_ok=True)
     t = store.now()
-    did = db.execute("INSERT INTO drafts (handoff_id, text, path, status, suggested_recipient, created, updated)"
-                     " VALUES (?, ?, '', 'ready', ?, ?, ?)", (h["id"], text, recipient, t, t)).lastrowid
+    did = db.execute("INSERT INTO drafts (handoff_id, text, path, status, suggested_recipient, note, created, updated)"
+                     " VALUES (?, ?, '', 'ready', ?, ?, ?, ?)", (h["id"], text, recipient, note, t, t)).lastrowid
     path = drafts_dir / f"{safe(h['label'])}-H{h['id']}-D{did}.md"
     path.write_bytes(text.encode("utf-8"))  # raw bytes: no locale encoding, no newline translation
     db.execute("UPDATE drafts SET path=? WHERE id=?", (str(path), did))
@@ -275,35 +303,27 @@ def save_draft(db, cfg, h, text, recipient=None, parts=None):
                     part.get("from_line"), part.get("to_line")))
     store.event(db, "draft:ready", f"D{did}", h["id"])
     store.set_handoff(db, h["id"], "review_ready", only_from=("assessing", "no_draft"))
-    if first:
-        notify(db, f"{store.about(db, h)}: review ready", "Open the Codex conversation to choose Send, Discuss, Keep waiting or Finish.",
-               h["id"])
+    if not first:
+        return
+    try:  # a notice never changes the saved draft, or stops its menu
+        if h["status"] == "finished":  # a Copy-only draft: nothing can be sent for it
+            notify(db, f"{store.about(db, h)}: draft ready to copy", "Open the Codex conversation to copy it. "
+                   "The report was finished, so nothing will reach Claude.", h["id"])
+        else:
+            notify(db, f"{store.about(db, h)}: review ready",
+                   "Open the Codex conversation to choose Send, Discuss, Keep waiting or Finish.", h["id"])
+    except Exception as e:  # any failure of a notice
+        store.event(db, "notify_failed", str(e), h["id"])
 
 
 def safe(label):
     return "".join(c if c.isalnum() or c in "-_" else "-" for c in label)[:60]
 
 
-def resolve_stale(db, h):
-    """Bring the record in line with reality when this session's waiting hook has gone away, including a send
-    to it that was interrupted: its transcript decides whether that draft arrived."""
-    if h["status"] in store.WAITING and not claude_hooks.pid_alive(h["hook_pid"]):
-        store.set_handoff(db, h["id"], "released", "Claude is no longer waiting (Esc, exit or hook stopped)",
-                          only_from=store.WAITING)
-    if not claude_hooks.pid_alive(h["hook_pid"]):
-        for d in store.addressed_to(db, h["id"], "sending"):
-            if claude_hooks.transcript_has_feedback(h["transcript_path"], d["text"]):
-                store.delivered(db, d["id"], h["id"], "confirmed in Claude's transcript")
-            else:
-                store.set_draft(db, d["id"], "unknown", "hook stopped mid-send; not found in Claude's transcript",
-                                only_from=("sending",))
-    return store.handoff(db, h["id"])
-
-
 def resolve_draft(db, d):
     """Resolve an interrupted send of draft `d` against the session it was addressed to; the draft as it now stands."""
     if d["status"] == "sending":
-        resolve_stale(db, store.handoff(db, d["recipient_handoff_id"] or d["handoff_id"]))
+        claude_hooks.resolve_stale(db, store.handoff(db, d["recipient_handoff_id"] or d["handoff_id"]))
     return db.execute("SELECT * FROM drafts WHERE id=?", (d["id"],)).fetchone()
 
 
@@ -314,7 +334,7 @@ FINISHABLE = store.WAITING + ("released", "timed_out", "session_ended", "failed"
 def menu(server, db, cfg, hid, gone=None):
     """Show the menu for the draft on hand-off `hid` and act on the user's choice. `gone` is a recipient that
     stopped waiting when the user chose Send to it: the menu returns saying so, with Copy for it."""
-    h = resolve_stale(db, store.handoff(db, hid))
+    h = claude_hooks.resolve_stale(db, store.handoff(db, hid))
     d = store.latest_draft(db, hid)
     if not d:
         if store.no_reply(db, hid):
@@ -322,6 +342,7 @@ def menu(server, db, cfg, hid, gone=None):
         return f"No draft yet for H{hid}. Draft one and call propose_reply."
     d = resolve_draft(db, d)
     waiting = h["status"] in store.WAITING
+    finished = h["status"] == "finished"  # a Copy-only draft: nothing is held, and nothing is left to release
     went_to = store.handoff(db, d["recipient_handoff_id"]) if (
         d["status"] == "sent" and d["recipient_handoff_id"] not in (None, hid)) else None
     if d["status"] == "sent" and not (went_to and waiting):
@@ -331,14 +352,16 @@ def menu(server, db, cfg, hid, gone=None):
         return f"Already sent to Claude (H{hid}, D{d['id']}). Wait for Claude's next output; it will arrive here."
     elsewhere = went_to is not None  # the source is still held after its draft went to another session
     sendable = waiting and d["status"] in ("ready", "failed")
-    held = held_sessions(db, h) if sendable else []
-    idle = sessions_not_held(db, h, [r["session_id"] for r in held + ([gone] if gone else [])]) if sendable else []
-    names = unique_names([h, *held, *idle, *(r for r in (gone, went_to) if r)])
+    # Every session on the ticket, the source first.
+    entries = sorted(claude_hooks.ticket_sessions(db, h["thread_id"]), key=lambda e: e["session_id"] != h["session_id"])
+    names = session_names(entries, h, gone, went_to)
+    source = names[h["session_id"]]
 
     state_line = {
         "released": "Claude is no longer waiting, so Send is not available. You can copy the draft.",
         "timed_out": "Claude's wait limit passed: timed out, not sent. You can copy the draft.",
         "session_ended": "The originating Claude session has ended. This draft has not been sent.",
+        "finished": "This report was finished without sending, so nothing can be sent for it. You can copy the draft.",
     }.get(h["status"], "")
     if d["status"] == "unknown":
         state_line = ("This draft might have reached Claude (the send was interrupted). "
@@ -347,22 +370,56 @@ def menu(server, db, cfg, hid, gone=None):
         state_line = f"The last send failed: {d['reason']}."
     elif d["status"] == "closed":
         state_line = d["reason"][:1].upper() + d["reason"][1:] + "."
+    elif d["status"] == "copied" and waiting:
+        state_line = ("This draft was copied to the clipboard, so Send is no longer offered for it. "
+                      "A new draft can be sent.")
     elif elsewhere:
-        state_line = (f"D{d['id']} was sent to {names[went_to['id']]} (H{went_to['id']}). {names[hid]} is still "
+        state_line = (f"D{d['id']} was sent to {names[went_to['session_id']]} (H{went_to['id']}). {source} is still "
                       f"waiting: draft something for it with propose_reply H{hid}, or finish it.")
 
-    copy = f"Copy for {names[gone['id']]}" if gone else COPY
-    finish = f"{FINISH} — release {names[hid]}"
-    sends = {f"Send to {names[r['id']]}": r for r in held}
-    copies = {f"Copy for {names[r['id']]}": r for r in idle}
-    destinations = [destination_line(r, names[r["id"]], r["id"] == hid) for r in held] + \
-                   [f"- {names[r['id']]}: not waiting ({not_held_reason(r)}); Copy only" for r in idle]
-    if sendable:
-        choices = ([copy] if gone else []) + [*sends, *copies, DISCUSS, KEEP, finish]
+    def takes_send(e):
+        """Send is for held sessions, while the draft's source is held (Q14). A hook started before recipients
+        existed collects drafts by the report they answer, not by recipient: its session can be sent only its
+        own drafts, and its drafts only to it."""
+        r = e["handoff"]
+        return sendable and e["held"] and (r["id"] == hid or bool(h["recipient_aware"] and r["recipient_aware"]))
+
+    if not waiting:
+        no_send = "the draft's source stopped waiting"
     elif elsewhere:
-        choices = [DISCUSS, KEEP, finish]
+        no_send = f"D{d['id']} was already sent"
+    elif d["status"] == "unknown":
+        no_send = "this draft might already have been delivered"
+    elif not sendable:
+        no_send = f"this draft is {d['status']}"
     else:
-        choices = [copy, DISCUSS, finish]
+        no_send = "it or the draft's source is held by an older relay hook, which takes only its own session's drafts"
+    copy_gone = f"Copy for {names[gone['session_id']]}" if gone else None
+    finish = f"{FINISH} — release {source}"
+    sends = {f"Send to {names[e['session_id']]}": e for e in entries if takes_send(e)}
+    # Copy for … names a listed session this draft can't be sent to; like plain Copy, it only fills the clipboard.
+    # It is offered where the draft could go to someone by hand: never for an uncertain delivery, whose menu
+    # stays as it was, nor while the source is held with a draft that is no longer the one to send.
+    copies = [f"Copy for {names[e['session_id']]}" for e in entries
+              if (sendable or not waiting) and d["status"] != "unknown" and not takes_send(e)
+              and not (gone and e["session_id"] == gone["session_id"])]
+    destinations = []
+    for e in entries:
+        name, is_source = names[e["session_id"]], e["session_id"] == h["session_id"]
+        if e["held"]:
+            destinations.append(destination_line(e["handoff"], name, is_source)
+                                + ("" if takes_send(e) else f" — Send isn't offered: {no_send}"))
+        else:
+            destinations.append(claude_hooks.session_line(e, name + (" (source)" if is_source else "")))
+    lead = [copy_gone] if gone else []
+    if sendable:
+        choices = [*lead, *sends, *copies, COPY, DISCUSS, KEEP, finish]
+    elif finished:
+        choices = [*copies, COPY, DISCUSS]
+    elif waiting:  # the source is held, but this draft can't be sent: it went elsewhere, or isn't in a state to send
+        choices = [COPY, DISCUSS, KEEP, finish] if elsewhere else [*lead, COPY, DISCUSS, finish]
+    else:
+        choices = [*lead, *copies, COPY, DISCUSS, finish]
 
     poll = {}
 
@@ -371,16 +428,17 @@ def menu(server, db, cfg, hid, gone=None):
         if not (sends or elsewhere):
             return None
         conn = poll.setdefault("db", store.connect())
-        cur = resolve_stale(conn, store.handoff(conn, hid))
+        cur = claude_hooks.resolve_stale(conn, store.handoff(conn, hid))
         return None if cur["status"] in store.WAITING else cur["status"]
 
     waiting_reports = [f"H{q['id']} from {store.session_name(q)}" for q in reports_queued(db, cfg, h)]
     if waiting_reports:
         state_line = "\n".join(p for p in (state_line, "Reports waiting for assessment: " + ", ".join(waiting_reports)) if p)
     parts = draft_parts(db, d)
-    message = menu_message(cfg, h, d, state_line, destinations, parts, provenance_line(db, parts) if parts else None)
+    message = menu_message(cfg, h, d, state_line, destinations, parts, provenance_line(db, parts) if parts else None,
+                           copy_only=finished)
     if gone:  # why nothing was sent comes first
-        message = not_sent_line(gone, names[gone["id"]]) + "\n" + message
+        message = not_sent_line(gone, names[gone["session_id"]]) + "\n" + message
     answer = server.elicit(message, choices, abort=source_stopped)
     if answer is ABORTED:
         h = store.handoff(db, hid)
@@ -392,16 +450,17 @@ def menu(server, db, cfg, hid, gone=None):
                 "The draft was not sent. Tell the user in one line, then end your turn; call show_menu if they want to copy it.")
     store.event(db, "menu:answer", f"D{d['id']} {answer!r}", hid)
     if answer in sends:
-        r = resolve_stale(db, store.handoff(db, sends[answer]["id"]))
-        result = send(db, cfg, h, d, r, names) if r["status"] in store.WAITING else None
+        r = claude_hooks.resolve_stale(db, store.handoff(db, sends[answer]["handoff"]["id"]))
+        recipient = names[r["session_id"]]
+        result = send(db, cfg, h, d, r, source, recipient) if r["status"] in store.WAITING else None
         if result is None:  # the recipient stopped waiting: nothing was sent, and the user decides what next
             return menu(server, db, cfg, hid, gone=store.handoff(db, r["id"]))
         return result
     if answer == KEEP:
         return KEEP_RESULT
     if answer == finish:
-        return finish_result(db, names[hid], hid)
-    if answer == copy or answer in copies:
+        return finish_result(db, source, hid)
+    if answer is not None and (answer in (COPY, copy_gone) or answer in copies):  # None is Esc: Discuss
         return copy_draft(db, d)
     return discuss_result(db, cfg, h, "this draft", "When you have a revised draft, call propose_reply again.")
 
@@ -442,8 +501,8 @@ def no_reply_screen(server, db, cfg, h):
     Send or Copy. Once the source stopped waiting, Keep waiting means nothing and isn't offered."""
     hid = h["id"]
     waiting = h["status"] in store.WAITING
-    names = unique_names([h, *held_sessions(db, h)]) if waiting else unique_names([h])
-    finish = f"{FINISH} — release {names[hid]}"
+    source = session_names(claude_hooks.ticket_sessions(db, h["thread_id"]) if waiting else [], h)[h["session_id"]]
+    finish = f"{FINISH} — release {source}"
     choices = [DISCUSS, KEEP, finish] if waiting else [DISCUSS, finish]
     state_line = "" if waiting else (f"Claude is no longer waiting ({h['reason'] or h['status']}). "
                                      "Nothing was sent.")
@@ -454,7 +513,7 @@ def no_reply_screen(server, db, cfg, h):
         f"Answering report H{hid} · ticket {h['label']} · Claude session {h['session_id'][:8]}",
         "Codex assessed that Claude needs no reply. There is no draft, and nothing will be sent.",
         state_line,
-        f"Finish releases {names[hid]} without a reply." if waiting else "") if p)
+        f"Finish releases {source} without a reply." if waiting else "") if p)
 
     poll = {}
 
@@ -462,7 +521,7 @@ def no_reply_screen(server, db, cfg, h):
         if not waiting:
             return None
         conn = poll.setdefault("db", store.connect())
-        cur = resolve_stale(conn, store.handoff(conn, hid))
+        cur = claude_hooks.resolve_stale(conn, store.handoff(conn, hid))
         return None if cur["status"] in store.WAITING else cur["status"]
 
     answer = server.elicit(message, choices, abort=source_stopped)
@@ -475,7 +534,7 @@ def no_reply_screen(server, db, cfg, h):
     if answer == KEEP and waiting:
         return KEEP_RESULT
     if answer == finish:
-        return finish_result(db, names[hid], hid)
+        return finish_result(db, source, hid)
     return discuss_result(db, cfg, h, "this report", "If Claude still needs no reply, call show_menu when the "
                           "user wants the menu; if it needs an instruction, call propose_reply.")
 
@@ -494,46 +553,19 @@ def reports_queued(db, cfg, h):
     return [q for q in rows if q["queue_item_id"] in in_queue]
 
 
-def held_sessions(db, h):
-    """Hand-offs whose sessions are held in their Stop hook on the source's conversation (the same project and
-    ticket), the source first, then in the order they reported."""
-    rows = db.execute(f"SELECT * FROM handoffs WHERE thread_id=? AND status IN ({','.join('?' * len(store.WAITING))})"
-                      " ORDER BY id", (h["thread_id"], *store.WAITING)).fetchall()
-    held = [r for r in (resolve_stale(db, r) for r in rows) if r["status"] in store.WAITING]
-    # A hook started before recipients existed collects drafts by the report they answer, not by recipient: its
-    # session can be sent only its own drafts, and its drafts only to it.
-    if not h["recipient_aware"]:
-        held = [r for r in held if r["id"] == h["id"]]
-    held = [r for r in held if r["id"] == h["id"] or r["recipient_aware"]]
-    return sorted(held, key=lambda r: r["id"] != h["id"])
-
-
-def sessions_not_held(db, h, exclude):
-    """The latest hand-off of each other session still linked to this ticket that is busy (it received an
-    instruction), released, finished, timed out or failed: it can't be sent to, so it is offered Copy."""
-    return db.execute("SELECT * FROM handoffs WHERE id IN (SELECT MAX(id) FROM handoffs WHERE thread_id=? "
-                      "GROUP BY session_id) AND status IN ('sent', 'released', 'finished', 'timed_out', 'failed') "
-                      "AND session_id IN (SELECT session_id FROM links WHERE label=?) "
-                      f"AND session_id NOT IN ({','.join('?' * len(exclude))}) ORDER BY id",
-                      (h["thread_id"], h["label"], *exclude)).fetchall()
+def session_names(entries, *handoffs):
+    """Names by session ID for a menu: each listed session as the list names it, so the menu and what Codex is
+    told agree; then the session of each of `handoffs` that isn't listed (a source that stopped waiting and has
+    no ongoing link, say), told apart from a listed session of the same name by its short session ID."""
+    names = {e["session_id"]: e["name"] for e in entries}
+    others = [(r["session_id"], store.session_name(r)) for r in handoffs if r and r["session_id"] not in names]
+    return {**store.unique_names(others, taken={e["base"] for e in entries}), **names}
 
 
 def destination_line(r, name, source):
     """A held session as the menu shows it, with where it was and when that was captured."""
     captured = time.strftime("%H:%M", time.localtime(r["created"]))
     return f"- {name}{' (source)' if source else ''}, H{r['id']}: {store.where(r)} · captured {captured}"
-
-
-def unique_names(hs):
-    """Names by hand-off id; two sessions with the same name are told apart by short session ID."""
-    sessions = {}
-    for r in hs:
-        sessions.setdefault(store.session_name(r), set()).add(r["session_id"])
-    names = {}
-    for r in hs:
-        n = store.session_name(r)
-        names[r["id"]] = n if len(sessions[n]) == 1 else f"{n} ({r['session_id'][:6]})"
-    return names
 
 
 def draft_parts(db, d):
@@ -578,42 +610,48 @@ def preview(cfg, d, parts):
     return "\n".join(out)
 
 
-def menu_message(cfg, h, d, state_line, destinations=(), parts=(), provenance=None):
+def menu_message(cfg, h, d, state_line, destinations=(), parts=(), provenance=None, copy_only=False):
+    """The menu's text. `copy_only` is a draft for a finished report: nothing in it says the draft is sent."""
     lines = d["text"].splitlines()
     shortened = not (len(lines) <= cfg["menu_inline_lines"] and len(d["text"]) <= cfg["menu_inline_chars"])
-    label = "Draft (sent exactly as stored):"
+    label = "Draft (copied exactly as stored):" if copy_only else "Draft (sent exactly as stored):"
     if not shortened:
         body = d["text"]
     elif parts:
         body = preview(cfg, d, parts)
-        label = "Draft (shortened preview; the exact draft is sent as stored in the file below):"
+        label = ("Draft (shortened preview; the exact draft is in the file below):" if copy_only else
+                 "Draft (shortened preview; the exact draft is sent as stored in the file below):")
     else:
         body = "\n".join(lines[:15]) + f"\n… ({len(lines)} lines, {len(d['text'])} characters)"
     parts_line = [provenance] if provenance else []
     head = [f"Answering report H{h['id']} · ticket {h['label']} · draft D{d['id']} · Claude session {h['session_id'][:8]}"]
     if d["suggested_recipient"]:
-        head.append(f"Reviewer suggests sending to: {d['suggested_recipient']} (a suggestion only)")
+        head.append(f"Reviewer suggests {'this draft for' if copy_only else 'sending to'}: {d['suggested_recipient']} "
+                    "(a suggestion only)")
     if state_line:
         head.append(state_line)
+    if d["note"]:
+        head.append(f"Reviewer's note to you (never sent): {d['note']}")
     if destinations:
         head += ["", "Sessions on this ticket:", *destinations]
     return "\n".join(head + parts_line + ["", label, body, "", f"Exact file: {d['path']}"])
 
 
-def send(db, cfg, h, d, r, names):
-    """Deliver draft `d` (answering source hand-off `h`) to the session holding hand-off `r`; `names` are the
-    menu's session names by hand-off id. None means nothing was sent because the recipient stopped waiting."""
+def send(db, cfg, h, d, r, source, recipient):
+    """Deliver draft `d` (answering source hand-off `h`) to the session holding hand-off `r`; `source` and
+    `recipient` are the two sessions' names in the menu. None means nothing was sent because the recipient
+    stopped waiting."""
     if not store.approve(db, d["id"], r["id"]):
         other = next(iter(store.addressed_to(db, r["id"], "approved") + store.addressed_to(db, r["id"], "sending")), None)
         if other and draft_status(db, d) in ("ready", "failed"):
-            return (f"Not sent: {names[r['id']]} is already receiving D{other['id']}. The draft is kept; "
+            return (f"Not sent: {recipient} is already receiving D{other['id']}. The draft is kept; "
                     "call show_menu to send it once that has arrived.")
         return f"Not sent: draft D{d['id']} is {draft_status(db, d)}."
     deadline = time.time() + cfg["send_pickup_secs"]
     while time.time() < deadline:
         cur = draft_status(db, d)
         if cur == "sent":
-            return sent_notice(h, d, r, names)
+            return sent_notice(h, d, r, source, recipient)
         if cur != "approved":
             time.sleep(0.3)
             continue
@@ -621,19 +659,19 @@ def send(db, cfg, h, d, r, names):
             break
         time.sleep(0.3)
     if store.set_draft(db, d["id"], "failed", "Claude's hook did not pick up the draft", only_from=("approved",)):
-        if resolve_stale(db, store.handoff(db, r["id"]))["status"] not in store.WAITING:
+        if claude_hooks.resolve_stale(db, store.handoff(db, r["id"]))["status"] not in store.WAITING:
             return None
-        return (f"Not sent: {names[r['id']]} is still waiting, but its hook did not collect D{d['id']} within "
+        return (f"Not sent: {recipient} is still waiting, but its hook did not collect D{d['id']} within "
                 f"{cfg['send_pickup_secs']} s. The draft is kept; call show_menu to try again.")
-    resolve_stale(db, store.handoff(db, r["id"]))
+    claude_hooks.resolve_stale(db, store.handoff(db, r["id"]))
     status = draft_status(db, d)
     if status == "sent":
-        return sent_notice(h, d, r, names)
+        return sent_notice(h, d, r, source, recipient)
     return (f"Send state is '{status}': it might have reached Claude. Tell the user to check Claude before any resend.")
 
 
 def not_held_reason(r):
-    return "busy: it received an instruction and is working" if r["status"] == "sent" else r["reason"] or r["status"]
+    return f"busy: {store.BUSY}" if r["status"] == "sent" else r["reason"] or r["status"]
 
 
 def not_sent_line(r, name):
@@ -646,12 +684,11 @@ def draft_status(db, d):
     return db.execute("SELECT status FROM drafts WHERE id=?", (d["id"],)).fetchone()["status"]
 
 
-def sent_notice(h, d, r, names):
+def sent_notice(h, d, r, source, recipient):
     """What Codex is told after a delivery. A send to another session says the source is still waiting."""
     if r["id"] == h["id"]:
         return "Sent to Claude. Claude is working; its next output will arrive here automatically."
-    source = names[h["id"]]
-    return (f"Sent D{d['id']} to {names[r['id']]} (H{r['id']}). {source[:1].upper() + source[1:]} H{h['id']} is still "
+    return (f"Sent D{d['id']} to {recipient} (H{r['id']}). {source[:1].upper() + source[1:]} H{h['id']} is still "
             f"waiting; use show_menu H{h['id']} to send it something or finish it.")
 
 

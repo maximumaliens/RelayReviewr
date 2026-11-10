@@ -69,3 +69,42 @@ class PerHandoffLine(RelayCase):
         self.assertIn("additions", line)
         self.assertIn("stand alone", line)
         self.assertIn(f'handoff "H{h["id"]}"', line)
+
+
+class OwnerFacingMaterial(RelayCase):
+    """#4: what is for the owner goes in the note or in chat, never in the draft; and Codex may draft for a linked
+    session that isn't held. Said in the operating instructions, the propose_reply description and the
+    per-hand-off line, so a conversation created before the change still gets the short form."""
+
+    def texts(self):
+        h = store.handoff(self.db, self.handoff())
+        line = next(l for l in intake.handoff_text(h).splitlines() if l.startswith("Reviewer instructions apply"))
+        return {"operating instructions": intake.OPS_INSTRUCTIONS, "propose_reply description":
+                propose_reply_tool()["description"], "per-hand-off line": line}
+
+    def test_all_three_say_owner_material_goes_in_the_note_or_chat_never_in_the_draft(self):
+        for where, text in self.texts().items():
+            text = " ".join(text.lower().split())
+            self.assertIn("note", text, where)
+            self.assertIn("assessment", text, where)
+            self.assertIn("checks you ran", text, where)
+            self.assertTrue(re.search(r"in (the )?`?note`? or in (your )?chat( reply)?, never in the draft", text),
+                            f"{where} doesn't say where owner-facing material goes")
+
+    def test_all_three_say_a_linked_session_that_is_not_held_can_be_drafted_for_and_gets_copy(self):
+        for where, text in self.texts().items():
+            text = " ".join(text.lower().split())
+            self.assertRegex(text, r"draft for a linked session that isn't held", where)
+            self.assertRegex(text, r"the owner (then )?gets copy", where)
+
+    def test_the_note_is_an_optional_string_argument(self):
+        schema = propose_reply_tool()["inputSchema"]
+        self.assertEqual(schema["properties"]["note"]["type"], "string")
+        self.assertEqual(schema["required"], ["handoff"])
+        self.assertIn("never sent", schema["properties"]["note"]["description"])
+
+    def test_the_instructions_describe_the_session_list_and_copy_only_drafts_for_a_finished_report(self):
+        text = " ".join(intake.OPS_INSTRUCTIONS.split())
+        self.assertIn("Sessions on this ticket", text)
+        self.assertIn("finished", text)
+        self.assertIn("Copy-only", text)
