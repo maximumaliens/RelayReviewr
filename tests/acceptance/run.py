@@ -30,6 +30,7 @@ def main():
         print("acceptance: sign-ins needed first (run each yourself, in a terminal):\n  " + "\n  ".join(todo), file=sys.stderr)
         return 2
     baseline = isolation.snapshot()
+    code_before = isolation.code_state(harness.ROOT)
     harness.log(f"installed store baseline: {isolation.INSTALLED_STORE} "
                 f"({'absent' if baseline is None else sum(len(rows) for rows in baseline.values())} rows)")
     run_id = time.strftime("%Y%m%d-%H%M%S")
@@ -74,7 +75,8 @@ def main():
         harness.log(f"=== test {n}: {verdict} {err or ''}")
     harness.tmux("kill-server", check=False)
     guard, code = isolation.guard(*isolation.attribute(baseline, isolation.snapshot(), marks))
-    (out / "summary.md").write_text(guard + "\n| # | test | verdict | evidence |\n|---|---|---|---|\n"
+    code_line = isolation.describe_code(code_before, isolation.code_state(harness.ROOT))
+    (out / "summary.md").write_text(guard + code_line + "\n| # | test | verdict | evidence |\n|---|---|---|---|\n"
                                     + "\n".join(summary) + "\n")
     print((out / "summary.md").read_text())
     return code

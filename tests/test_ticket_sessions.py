@@ -52,16 +52,6 @@ class Ticket(RelayCase):
         self.run_link(session, self.repo, "--as", role, label, once=True)
         return self.report(session, "Forwarding the previous reply")
 
-    def clipboard(self):
-        """Stands in for clip.exe (and leaves no powershell.exe to toast with): the file Copy writes to."""
-        clip, copied = self.root / "clip.exe", self.root / "clipboard"
-        clip.write_text(f"#!/bin/sh\ncat > {copied}\n")
-        clip.chmod(0o755)
-        patched = mock.patch.object(mcp_server.shutil, "which", lambda name: str(clip) if name == "clip.exe" else None)
-        patched.start()
-        self.addCleanup(patched.stop)
-        return copied
-
     def sessions_shown(self, srv):
         """The "Sessions on this ticket" lines of the first form shown."""
         lines = srv.forms[0]["message"].split("Sessions on this ticket:\n", 1)[1].split("\n\n", 1)[0]
@@ -271,7 +261,7 @@ class SourceNotHeld(Ticket):
 
 class PlainCopy(Ticket):
     def test_esc_is_discuss_and_copies_nothing(self):
-        clipboard = self.clipboard()
+        clipboard = self.fake_clipboard()
         self.link(VERIFIER, "verifier")
         h = self.report(VERIFIER)
         _, result = self.menu(h, None, tool="propose_reply", draft="fix it")
@@ -288,7 +278,7 @@ class PlainCopy(Ticket):
         self.assertIn("Reviewer suggests sending to: designer (a suggestion only)", hinted.forms[0]["message"])
 
     def test_copies_the_exact_draft_and_sends_nothing(self):
-        clipboard = self.clipboard()
+        clipboard = self.fake_clipboard()
         self.link(VERIFIER, "verifier")
         h = self.report(VERIFIER)
         hook = self.start_wait_hook(h["id"])
@@ -302,7 +292,7 @@ class PlainCopy(Ticket):
                       srv.forms[0]["message"])
 
     def test_after_the_draft_went_to_another_session_the_delivery_is_stated_and_stays_recorded(self):
-        clipboard = self.clipboard()
+        clipboard = self.fake_clipboard()
         self.link(VERIFIER, "verifier")
         self.link(BUILDER, "builder")
         builder = self.report(BUILDER)
@@ -437,7 +427,7 @@ class FinishedReport(Ticket):
         self.unchanged()
 
     def test_show_menu_reopens_that_menu_and_copy_never_reaches_a_waiting_hook(self):
-        clipboard = self.clipboard()
+        clipboard = self.fake_clipboard()
         hook = self.start_wait_hook(self.held["id"])  # the builder's real waiting hook, beside the Copy-only draft
         first, _ = self.menu(self.h, "Discuss", tool="propose_reply", draft="one more thing")
         again, result = self.menu(self.h, "Copy for builder")

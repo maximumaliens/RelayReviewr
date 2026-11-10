@@ -24,7 +24,8 @@ def start():
     if STATE.exists():
         print(f"manual: a baseline from an unfinished check exists ({STATE}); run finish first", file=sys.stderr)
         return 2
-    STATE.write_bytes(pickle.dumps({"started": time.time(), "baseline": isolation.snapshot()}))
+    STATE.write_bytes(pickle.dumps({"started": time.time(), "baseline": isolation.snapshot(),
+                                 "code": isolation.code_state(harness.ROOT)}))
     print(f"baseline taken: {isolation.INSTALLED_STORE}")
     return 0
 
@@ -37,7 +38,8 @@ def finish():
     guard, code = isolation.guard(mine, other)
     out = harness.ROOT / "results" / (time.strftime("%Y%m%d-%H%M%S", time.localtime(saved["started"])) + "-manual")
     out.mkdir(parents=True, exist_ok=True)
-    (out / "summary.md").write_text(guard + f"\nTest sessions: {sorted(sids)}\nTest labels: {sorted(labels)}\n")
+    code_line = isolation.describe_code(saved.get("code", (None, None)), isolation.code_state(harness.ROOT))
+    (out / "summary.md").write_text(guard + code_line + f"\nTest sessions: {sorted(sids)}\nTest labels: {sorted(labels)}\n")
     print((out / "summary.md").read_text())
     STATE.unlink()
     return code

@@ -15,6 +15,7 @@ Notable changes to the relay. Releases before this file are described on the Git
 - **Note to the owner (#4).** `propose_reply` takes an optional `note`. The menu shows it above the draft; it is never sent and is no part of the draft or its file. The reviewer's instructions, the tool description and each report's header say that owner-facing material goes in the note or in chat, never in the draft.
 
 ### Changed
+- **Test and documentation upkeep (#9); the relay's behaviour is unchanged.** Unit tests no longer launch `powershell.exe` or `clip.exe`, even in processes they start, and Copy tests use an opt-in fake clipboard. Each acceptance run's `summary.md` records the commit and any uncommitted changes. `CLAUDE.md` points to the privacy rules for commits, pull requests and issues, and `docs/development.md` gives the single-file and `-k` test commands.
 - **Send needs the draft's source session held (#4, confirming the earlier rule).** When the source has stopped waiting, the menu offers no Send even if another session on the ticket is held; that session is listed with the reason and gets Copy.
 - **Discuss says Claude stays held (#3).** The Discuss result, the reviewer instructions, the tool descriptions and the README tell Codex and you to choose Finish first to answer Claude directly.
 - Draft files are written as UTF-8 bytes with no newline translation.
