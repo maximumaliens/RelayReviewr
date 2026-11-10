@@ -5,6 +5,7 @@ import io
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,33 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from ccrelay import mcp_server, store  # noqa: E402
+
+
+# The Windows tools the relay launches when it finds them: toasts (notify.py) and Copy (mcp_server.py).
+WINDOWS_TOOLS = ("powershell.exe", "clip.exe")
+
+
+def path_without_windows_tools(path):
+    """`path` minus every folder that holds one of WINDOWS_TOOLS (on WSL, the Windows folders mounted into PATH)."""
+    return os.pathsep.join(d for d in path.split(os.pathsep)
+                           if not any(shutil.which(tool, path=d) for tool in WINDOWS_TOOLS))
+
+
+class LaunchedWindowsTool(AssertionError):
+    pass
+
+
+def guarded_popen(allowed_under):
+    """A subprocess.Popen that refuses to start one of WINDOWS_TOOLS unless it lives under `allowed_under`
+    (a test's own fake)."""
+    class GuardedPopen(subprocess.Popen):
+        def __init__(self, args, *a, **kw):
+            exe = args if isinstance(args, (str, bytes, os.PathLike)) else (args[0] if args else "")
+            exe = os.fsdecode(exe)
+            if os.path.basename(exe) in WINDOWS_TOOLS and not pathlib.Path(exe).resolve().is_relative_to(allowed_under):
+                raise LaunchedWindowsTool(f"a test launched {exe}")
+            super().__init__(args, *a, **kw)
+    return GuardedPopen
 
 
 def git(*args, cwd):
@@ -85,11 +113,19 @@ class FakeCodex:
 
 
 class RelayCase(unittest.TestCase):
-    """A temporary relay state folder per test, plus helpers to seed what the Stop hook and Codex leave."""
+    """A temporary relay state folder per test, plus helpers to seed what the Stop hook and Codex leave.
+    No test has powershell.exe or clip.exe: PATH is cleared of them for the test and every process it starts, and
+    launching either by path fails the test. A test that needs to see a copy asks for fake_clipboard()."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = pathlib.Path(self.tmp.name)
+        self.root = pathlib.Path(self.tmp.name).resolve()
+        self.old_path = os.environ.get("PATH")
+        if self.old_path is not None:
+            os.environ["PATH"] = path_without_windows_tools(self.old_path)
+        guard = mock.patch.object(subprocess, "Popen", guarded_popen(self.root))
+        guard.start()
+        self.addCleanup(guard.stop)
         self.old_home = os.environ.get("RELAY_HOME")
         os.environ["RELAY_HOME"] = str(self.root / "state")
         self.db = store.connect()
@@ -101,11 +137,24 @@ class RelayCase(unittest.TestCase):
                 p.kill()
             p.wait()
         self.db.close()
+        if self.old_path is not None:
+            os.environ["PATH"] = self.old_path
         if self.old_home is None:
             os.environ.pop("RELAY_HOME", None)
         else:
             os.environ["RELAY_HOME"] = self.old_home
         self.tmp.cleanup()
+
+    def fake_clipboard(self):
+        """Opt in to a clip.exe that writes what it is given (UTF-16-LE, as Copy sends it) to the returned file.
+        It is found through PATH, so the waiting hook and other processes a test starts see it too."""
+        bin_dir, copied = self.root / "bin", self.root / "clipboard"
+        bin_dir.mkdir(exist_ok=True)
+        clip = bin_dir / "clip.exe"
+        clip.write_text(f"#!/bin/sh\ncat > '{copied}'\n")
+        clip.chmod(0o755)
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+        return copied
 
     def project(self, name="Project"):
         repo = self.root / name

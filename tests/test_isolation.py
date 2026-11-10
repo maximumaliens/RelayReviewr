@@ -294,5 +294,52 @@ class RefuseInstalledPaths(unittest.TestCase):
         isolation.refuse_installed(pathlib.Path(tempfile.gettempdir()) / "relay-accept" / "relay")
 
 
+class CodeUnderTest(unittest.TestCase):
+    """Each acceptance summary names the commit it ran and whether the tree had uncommitted changes (#9)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = pathlib.Path(self.tmp.name)
+        self.git("init", "-q")
+        self.git("commit", "-q", "--allow-empty", "-m", "seed")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def git(self, *args):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=self.repo,
+                              check=True, capture_output=True, text=True).stdout.strip()
+
+    def test_a_clean_tree_is_its_head_commit(self):
+        head = self.git("rev-parse", "HEAD")
+        self.assertEqual(isolation.code_state(self.repo), (head, False))
+        self.assertEqual(isolation.describe_code(isolation.code_state(self.repo)),
+                         f"Code under test: commit {head}, no uncommitted changes\n")
+
+    def test_an_edit_or_a_new_file_is_uncommitted_changes_but_an_ignored_one_is_not(self):
+        (self.repo / ".gitignore").write_text("results/\n")
+        self.git("add", ".gitignore")
+        self.git("commit", "-q", "-m", "ignore")
+        (self.repo / "results").mkdir()
+        (self.repo / "results" / "x").write_text("x")
+        self.assertFalse(isolation.code_state(self.repo)[1])
+        (self.repo / "new.py").write_text("x")
+        self.assertTrue(isolation.code_state(self.repo)[1])
+        self.assertIn("with uncommitted changes", isolation.describe_code(isolation.code_state(self.repo)))
+
+    def test_a_change_during_the_run_is_flagged(self):
+        before = isolation.code_state(self.repo)
+        (self.repo / "late.py").write_text("x")
+        text = isolation.describe_code(before, isolation.code_state(self.repo))
+        self.assertIn("The code changed during the run", text)
+        self.assertNotIn("changed during", isolation.describe_code(before, before))
+
+    def test_a_folder_that_is_not_a_repository_is_unknown(self):
+        with tempfile.TemporaryDirectory() as other:
+            state = isolation.code_state(other)
+        self.assertEqual(state, (None, None))
+        self.assertIn("unknown", isolation.describe_code(state))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

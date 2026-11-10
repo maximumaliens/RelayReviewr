@@ -9,6 +9,7 @@ the schema and migrate it.
 """
 import pathlib
 import sqlite3
+import subprocess
 
 HOME = pathlib.Path.home()
 INSTALLED_STATE = HOME / ".local/state/cc-codex-relay"
@@ -129,6 +130,32 @@ def guard(mine, other, store=INSTALLED_STORE):
                  "such as the user's own sessions; check none is a leak):\n"
                  + "".join(f"- {describe(c)}\n" for c in other))
     return text, 1 if mine else 0
+
+
+def code_state(root):
+    """(commit, dirty) of the git tree at `root`: `git rev-parse HEAD`, and whether `git status --porcelain` lists
+    any change, untracked files included (ignored ones, such as results/, are not). (None, None) when git can't say."""
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=True).stdout
+    try:
+        return git("rev-parse", "HEAD").strip(), bool(git("status", "--porcelain").strip())
+    except (OSError, subprocess.CalledProcessError):
+        return None, None
+
+
+def describe_code(before, after=None):
+    """The summary's line naming the code under test: the commit and whether the tree had uncommitted changes.
+    `before` and `after` are code_state results from the start and the end of the run; if they differ, the line says
+    the code changed during the run."""
+    def one(state):
+        commit, dirty = state
+        if commit is None:
+            return "unknown (git could not be read)"
+        return f"commit {commit}, " + ("with uncommitted changes" if dirty else "no uncommitted changes")
+    text = f"Code under test: {one(before)}\n"
+    if after is not None and before[0] is not None and after != before:
+        text += f"**The code changed during the run:** at the end it was {one(after)}\n"
+    return text
 
 
 def refuse_installed(path):

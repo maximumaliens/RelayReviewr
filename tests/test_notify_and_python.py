@@ -4,7 +4,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from ccrelay import store  # noqa: E402
@@ -26,8 +25,7 @@ class TitlePrefix(RelayCase):
     """A relay state whose config sets notify_title_prefix (the acceptance environment's) marks every title."""
 
     def notified(self):
-        with mock.patch("ccrelay.notify.shutil.which", return_value=None):
-            notify(self.db, "T-1: review ready", "body")
+        notify(self.db, "T-1: review ready", "body")
         return (store.relay_home() / "notifications.log").read_text()
 
     def test_prefix_from_config_marks_the_title(self):
