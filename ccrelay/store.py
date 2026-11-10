@@ -173,7 +173,8 @@ def connect():
     for table, column, kind in (("drafts", "suggested_recipient", "TEXT"), ("links", "role", "TEXT"),
                                 ("handoffs", "display_name", "TEXT"), ("handoffs", "branch", "TEXT"),
                                 ("handoffs", "head", "TEXT"), ("drafts", "recipient_handoff_id", "INTEGER"),
-                                ("handoffs", "recipient_aware", "INTEGER")):
+                                ("handoffs", "recipient_aware", "INTEGER"), ("links", "once_label", "TEXT"),
+                                ("links", "once_role", "TEXT")):
         if column not in {r["name"] for r in db.execute(f"PRAGMA table_info({table})")}:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
     return db

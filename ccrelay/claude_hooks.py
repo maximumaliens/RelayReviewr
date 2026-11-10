@@ -24,16 +24,32 @@ def transcript_entries(path):
         return
 
 
-def last_assistant_text(path):
-    """Final assistant text in a Claude transcript (used by /relay-review to forward the previous turn)."""
-    last = None
+def entry_texts(entry):
+    """The text in a transcript entry's message: its text parts, or the whole content when that is a string."""
+    content = (entry.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return [content]
+    if isinstance(content, list):
+        return [c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text"]
+    return []
+
+
+def last_reply(path, command_marker):
+    """The last assistant text in a Claude transcript that isn't a reply to one of the relay's own commands
+    (/relay-review forwards it), or None. Claude Code records a command as a user entry holding the command
+    file's text, which carries `command_marker`; whatever the assistant says from there until the next prompt is
+    the reply to that command. A user entry holding only tool results isn't a prompt: it leaves the turn it is in
+    as it was."""
+    last, to_command = None, False
     for entry in transcript_entries(path):
-        if entry.get("type") != "assistant":
-            continue
-        content = (entry.get("message") or {}).get("content")
-        parts = [c.get("text", "") for c in content if c.get("type") == "text"] if isinstance(content, list) else []
-        if parts:
-            last = "\n".join(parts)
+        texts = entry_texts(entry)
+        if entry.get("type") == "user":
+            content = (entry.get("message") or {}).get("content")
+            if not (isinstance(content, list) and content
+                    and all(isinstance(c, dict) and c.get("type") == "tool_result" for c in content)):
+                to_command = any(command_marker in t for t in texts)
+        elif entry.get("type") == "assistant" and texts and not to_command:
+            last = "\n".join(texts)
     return last
 
 
@@ -127,6 +143,11 @@ def stop():
     message = link["once_message"] or payload["last_assistant_message"] or ""
     if link["once"]:
         db.execute("DELETE FROM links WHERE session_id=?", (sid,))
+    elif link["once_message"]:
+        # A one-off review in a linked session: it goes under the label and role review-once settled on, and the
+        # session's own link stays as it was.
+        db.execute("UPDATE links SET once_message=NULL, once_label=NULL, once_role=NULL WHERE session_id=?", (sid,))
+        link = {**link, "label": link["once_label"], "role": link["once_role"]}
 
     for old in db.execute("SELECT id FROM handoffs WHERE session_id=? AND status IN (%s)"
                           % ",".join("?" * len(store.WAITING)), (sid, *store.WAITING)).fetchall():

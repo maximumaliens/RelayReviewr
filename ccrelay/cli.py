@@ -58,34 +58,71 @@ def link(args, once=False):
     sid = session_env()
     cwd = project_dir()
     role, args = parse_role(args)
-    label = " ".join(args).strip() or default_label(cwd)
+    label = " ".join(args).strip()
     db = store.connect()
-    once_message = None
     if once:
-        once_message = claude_hooks.last_assistant_text(transcript_path(cwd, sid))
-        if not once_message:
-            sys.exit("relay: no previous Claude reply found to forward")
-    db.execute("INSERT OR REPLACE INTO links (session_id, label, role, cwd, once, skip_next, once_message, created)"
-               " VALUES (?, ?, ?, ?, ?, 1, ?, ?)", (sid, label, role, cwd, int(once), once_message, store.now()))
-    store.event(db, "link:once" if once else "link", f"{sid} -> {label}")
-    done = (f"Forwarding the previous reply to Codex review for '{label}' when this turn ends." if once
-            else f"Linked this session to '{label}'. Each turn from now on goes to Codex review.")
-    # Create the ticket's conversation now (empty: nothing is queued), so it can be opened straight away. The link
-    # is already recorded; if Codex can't be reached, the Stop hook creates the conversation at the first hand-off.
+        return review_once(db, sid, cwd, label, role)
+    label = label or default_label(cwd)
+    db.execute("INSERT OR REPLACE INTO links (session_id, label, role, cwd, once, skip_next, created)"
+               " VALUES (?, ?, ?, ?, 0, 1, ?)", (sid, label, role, cwd, store.now()))
+    store.event(db, "link", f"{sid} -> {label}")
+    reply_with_conversation(db, sid, label, cwd, f"Linked this session to '{label}'",
+                            then="Each turn from now on goes to Codex review.")
+
+
+def review_once(db, sid, cwd, label, role):
+    """/relay-review: have the Stop hook of the command's own turn forward the session's last reply, once. A
+    session that is already linked keeps its link: the one-off rides on the link's row, under the label and role
+    it names (the link's own, for whichever it doesn't name), and the hook clears it after forwarding. Refused,
+    writing nothing, when there is no reply to forward: Claude Code then runs no turn, so no Stop hook follows."""
+    transcript = transcript_path(cwd, sid)
+    if not transcript.is_file():
+        sys.exit(f"relay: this session's transcript wasn't found at {transcript}. Nothing was forwarded.")
+    message = claude_hooks.last_reply(transcript, MARKER)
+    if not message:
+        sys.exit("relay: no reply to forward. This session has no Claude reply yet, other than replies to the "
+                 "relay's own commands. Nothing was forwarded.")
+    own = db.execute("SELECT * FROM links WHERE session_id=? AND once=0", (sid,)).fetchone()
+    sent_as = stays = ""
+    if own:
+        label, role = label or own["label"], role or own["role"]
+        db.execute("UPDATE links SET skip_next=1, once_message=?, once_label=?, once_role=? WHERE session_id=?",
+                   (message, label, role, sid))
+        stays = f"this session stays linked to '{own['label']}'"
+        if (label, role) != (own["label"], own["role"]):
+            sent_as = f" as {store.display_name(role, own['cwd'], sid)}"
+            stays += (f" as {store.display_name(own['role'], own['cwd'], sid)}, and its later replies go there as "
+                      "before")
+        if os.path.isdir(own["cwd"]):  # the conversation's project, chosen as the Stop hook will choose it
+            cwd = own["cwd"]
+    else:
+        label = label or default_label(cwd)
+        db.execute("INSERT OR REPLACE INTO links (session_id, label, role, cwd, once, skip_next, once_message, created)"
+                   " VALUES (?, ?, ?, ?, 1, 1, ?, ?)", (sid, label, role, cwd, message, store.now()))
+    store.event(db, "link:once", f"{sid} -> {label}")
+    reply_with_conversation(db, sid, label, cwd,
+                            f"Forwarding the previous reply for '{label}'{sent_as} when this turn ends", also=stays)
+
+
+def reply_with_conversation(db, sid, label, cwd, done, also="", then=""):
+    """Create the ticket's conversation now (empty: nothing is queued), so it can be opened straight away, and
+    print the command's one-line reply. Its first sentence holds the clauses `done`, how to open the conversation
+    and `also`; the sentence `then` follows. The link is already recorded; if Codex can't be reached, the Stop
+    hook creates the conversation at the first hand-off."""
+    def reply(*clauses, last=""):
+        print(" ".join(filter(None, ("; ".join(filter(None, clauses)) + ".", then, last))))
     try:
         intake.ensure_thread(db, store.load_config(), label, cwd)
     except (OSError, subprocess.SubprocessError, codexrpc.CodexError, KeyError, ValueError) as e:
         # also a malformed config or an unexpected Codex reply: the user gets the plain line, not a traceback
         store.event(db, "link:no_conversation", f"{sid} -> {label}")  # the reason is in the reply
         reason = " ".join(str(e).split())  # one line: the command file has Claude echo the line verbatim
-        print(f"{done} The Codex conversation couldn't be created yet ({reason}); it will be retried when the first "
-              "turn is forwarded.")
-        return
-    # The hint goes in the first sentence: Claude is told to echo this line, but sometimes keeps only the start.
-    # It is worded for the user: Claude has taken a bare "open it now: relay review …" as its own task and run it.
-    hint = f'open its Codex conversation now from your own terminal: relay review "{label}"'
-    print(f"Forwarding the previous reply for '{label}' when this turn ends; {hint}." if once
-          else f"Linked this session to '{label}'; {hint}. Each turn from now on goes to Codex review.")
+        return reply(done, also, last=f"The Codex conversation couldn't be created yet ({reason}); it will be retried "
+                                      "when the first turn is forwarded.")
+    # The hint and what happens to an existing link go in the first sentence: Claude is told to echo this line, but
+    # sometimes keeps only the start. The hint is worded for the user: Claude has taken a bare "open it now: relay
+    # review …" as its own task and run it.
+    reply(done, f'open its Codex conversation now from your own terminal: relay review "{label}"', also)
 
 
 def unlink():
