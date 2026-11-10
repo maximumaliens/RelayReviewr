@@ -76,7 +76,12 @@ The relay uses no API keys. Claude and Codex run on whatever sign-in they alread
 5. **Read Codex's assessment and draft, then choose from the menu** (below).
 6. **Stop reviewing** a session with `/relay-unlink` in Claude.
 
-To review just one reply from a session that isn't linked, type `/relay-review issue-42` (it also takes `--as`). The reply Claude just finished is sent once, and the session is held like a linked one until you decide.
+To review just one reply, type `/relay-review issue-42` (it also takes `--as`). The last reply Claude finished is sent once, and the session is held like a linked one until you decide.
+
+- **What it sends:** Claude's last reply, not counting replies to the relay's own commands. After `/relay-link`, for example, it sends the reply from before you linked, not the "Linked this session…" line. If the session has no reply of Claude's own yet, the command says so and sends nothing.
+- **It doesn't change an existing link.** A session that isn't linked stays unlinked afterwards. A linked session stays linked, with its label and role, and its later replies are reviewed as before.
+- **In a linked session,** leave out the label and `--as` to send the reply to the session's own ticket under its own role. If you name a different label or role, only that one reply goes there, and Claude's reply says the session stays linked to its own ticket. Whatever Claude does next is reported to its own ticket.
+- **Background tasks:** if the `/relay-review` turn ends while Claude still has background tasks running, the reply isn't sent then. In a linked session the one-off is dropped: you get the notification "one-off review skipped", the session stays linked, and its next reply is reviewed as usual. Run `/relay-review` again when the tasks have finished. In a session that isn't linked, the reply is sent when the next turn ends without background tasks.
 
 ### The menu
 

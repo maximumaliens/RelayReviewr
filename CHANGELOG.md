@@ -13,5 +13,10 @@ Notable changes to the relay. Releases before this file are described on the Git
 - **Discuss says Claude stays held (#3).** The Discuss result, the reviewer instructions, the tool descriptions and the README tell Codex and you to choose Finish first to answer Claude directly.
 - Draft files are written as UTF-8 bytes with no newline translation.
 
+### Fixed
+- **`/relay-review` sends Claude's last real reply (#5).** It passed on the reply to the relay's own command, such as the "Linked this session…" line after `/relay-link`. It now skips replies to `/relay-link`, `/relay-unlink` and `/relay-review`. If the session has no other reply, or its transcript can't be found, it says so and sends nothing.
+- **`/relay-review` no longer unlinks a linked session (#5).** The session keeps its link, label and role, and later replies are reviewed as before. With no label or `--as`, the reply goes to the session's own ticket; if you name a different label or role, only that reply goes there and Claude's reply says the link stays. If the `/relay-review` turn ends while background tasks are running, the one-off is dropped with a "one-off review skipped" notification, and the session's next reply is reviewed through its link as usual; run `/relay-review` again when the tasks finish.
+
 ### Known limitations
+- **An interrupted `/relay-review` turn (#5).** If you press Esc before the command's turn ends, the reply is sent at the session's next turn end, in place of that turn's own reply.
 - **Existing conversations keep their old operating instructions (#2, unresolved).** Instructions are given only when a conversation is created, and no tested way updates them. A new ticket label starts a conversation with the current instructions. Reopening the conversation's window or restarting the Codex daemon replaced the tool server in testing. See the README, *After you update the relay*.

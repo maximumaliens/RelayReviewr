@@ -145,10 +145,15 @@ class RelayCase(unittest.TestCase):
     def run_stop_hook(self, session, label="T-1", linked_in=None, role=None, message="report", **payload):
         """Run the real Stop hook for a linked session against self.codex (a FakeCodex), with the waiting loop
         returning at once. Returns the hand-off it filed."""
-        from ccrelay import claude_hooks
         linked_in = linked_in or self.root
         self.db.execute("INSERT OR REPLACE INTO links (session_id, label, cwd, role, created) VALUES (?, ?, ?, ?, 0)",
                         (session, label, str(linked_in), role))
+        return self.end_turn(session, message, **payload)
+
+    def end_turn(self, session, message="report", **payload):
+        """Run the real Stop hook for a turn of `session` that ended with `message`, with the session's link as
+        the commands left it. Returns the session's newest hand-off, or None if it has none."""
+        from ccrelay import claude_hooks
         payload = {"session_id": session, "transcript_path": str(self.root / f"{session}.jsonl"),
                    "last_assistant_message": message, **payload}
         with self.codex.installed(), mock.patch.object(claude_hooks, "wait", lambda db, cfg, hid: 0), \
@@ -166,6 +171,14 @@ class RelayCase(unittest.TestCase):
         env = {"CLAUDE_CODE_SESSION_ID": session, "CLAUDE_PROJECT_DIR": str(cwd), "HOME": str(self.root)}
         with mock.patch.dict(os.environ, env), self.codex.installed(), contextlib.redirect_stdout(out):
             cli.link(list(args), once=once)
+        return out.getvalue()
+
+    def run_unlink(self, session):
+        """Run the command /relay-unlink runs in Claude session `session`; returns what it printed."""
+        from ccrelay import cli
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": session}), contextlib.redirect_stdout(out):
+            cli.unlink()
         return out.getvalue()
 
     @property
