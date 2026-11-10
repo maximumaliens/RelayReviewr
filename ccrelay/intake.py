@@ -105,9 +105,10 @@ def handover_block(handover):
     )
 
 
-def handoff_text(h, handover=None, last=None):
+def handoff_text(h, handover=None, last=None, sessions=""):
     """The hand-off as Codex receives it. `last` is the instruction this session last received, from
-    store.last_delivered, so Codex knows what Claude was told."""
+    store.last_delivered, so Codex knows what Claude was told. `sessions` is the list of the ticket's sessions
+    as Codex is told it (claude_hooks.sessions_text)."""
     stamp = time.strftime("%H:%M", time.localtime(h["created"]))
     name = h["display_name"] if "display_name" in h.keys() else None
     sender = f" · from {name}" if name else ""
@@ -116,13 +117,17 @@ def handoff_text(h, handover=None, last=None):
         where = f"Sent from {store.where(h)}\n"
     if last:
         where += f"Last instruction delivered: D{last[0]}, source {store.session_name(last[1])} H{last[1]['id']}\n"
+    if sessions:
+        where += f"{sessions}\n"
     return (
         f"[cc-codex-relay handoff H{h['id']} · ticket {h['label']}{sender} · Claude session {h['session_id'][:8]} · {stamp}]\n"
         "Reviewer instructions apply: assess this; if Claude needs an instruction, call propose_reply with either the exact prompt to send back "
         "(draft) or a copy of this report made by the relay (copy, optionally with your additions), never both; "
         "the sessions are isolated, so the delivered text must stand alone, "
         f"passing handoff \"H{h['id']}\". If Claude needs no instruction, don't draft an acknowledgement: "
-        "say so and call no_reply_menu instead, recommending Finish.\n"
+        "say so and call no_reply_menu instead, recommending Finish. "
+        "Anything for the owner (your assessment, the checks you ran) goes in the note or in chat, never in the "
+        "draft. You may draft for a linked session that isn't held: the owner then gets Copy.\n"
         f"{where}\n"
         f"{handover_block(handover)}"
         "--- Claude's final output ---\n"
