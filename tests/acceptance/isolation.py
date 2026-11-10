@@ -75,7 +75,7 @@ def carries_mark(table, row, marks, roots):
     if table != "events" or not isinstance(row.get("detail"), str):
         return False
     kind, detail = row["kind"], row["detail"]
-    if kind in ("link", "link:once", "link:no_conversation"):  # "<session> -> <label>"
+    if kind in ("link", "link:once", "link:once_skipped", "link:no_conversation"):  # "<session> -> <label>"
         sid, _, label = detail.partition(" -> ")
         return sid in marks["session_ids"] or label in marks["labels"]
     if kind == "thread:created":  # "<project> <label> -> <thread>"

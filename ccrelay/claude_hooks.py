@@ -139,6 +139,8 @@ def stop():
             return 0
     if payload.get("background_tasks"):
         store.event(db, "hook:skipped_background", sid)
+        if link["once_message"] and not link["once"]:
+            drop_one_off(db, sid, link)
         return 0
     message = link["once_message"] or payload["last_assistant_message"] or ""
     if link["once"]:
@@ -175,6 +177,21 @@ def stop():
     store.set_handoff(db, hid, "assessing", only_from=("queued",))
     tell_if_queued_behind_a_menu(db, store.handoff(db, hid), thread_id, turn_running)  # now with its conversation
     return wait(db, cfg, hid)
+
+
+def drop_one_off(db, sid, link):
+    """A linked session's one-off review wasn't forwarded, because its turn ended with background tasks still
+    running. It is dropped, so it can't be sent later in place of a reply the link would have reported, and the
+    user is told to run /relay-review again. The link itself is untouched. Failing to give the notice changes
+    nothing: the one-off is already dropped."""
+    db.execute("UPDATE links SET once_message=NULL, once_label=NULL, once_role=NULL WHERE session_id=?", (sid,))
+    store.event(db, "link:once_skipped", f"{sid} -> {link['once_label']}")
+    try:
+        notify(db, f"{link['once_label']}: {store.display_name(link['once_role'], link['cwd'], sid)} one-off review "
+               "skipped", "Claude still has background tasks running, so the reply wasn't forwarded. Run /relay-review "
+               f"again when they finish. The session stays linked to '{link['label']}'.")
+    except OSError as e:
+        store.event(db, "notify_failed", str(e))
 
 
 def codex_turn_running(cfg, thread_id):

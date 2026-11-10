@@ -1041,12 +1041,64 @@ def t23_refresh_for_no_reply():
         kill_session("cx23")
 
 
+def t24_review_once_in_a_linked_session():
+    """#5: in a session linked after its work was done, /relay-review forwards the last reply of Claude's own, not
+    the /relay-link acknowledgement, and the session stays linked: once released, its next reply is reported under
+    the same label and role."""
+    label = f"T24-{TAG}"
+    since = time.time()
+    claude_start("cc24")
+    claude_say("cc24", "Reply with just: T24-CLOSEOUT")
+    wait_until(lambda: any(k == "assistant" and "T24-CLOSEOUT" in t for k, t in transcript_texts(session_transcript(since))),
+               waiting("Claude's reply before linking", 60), "Claude's reply before linking")
+    wait_until(lambda: "esc to interrupt" not in screen("cc24"), waiting("Claude idle", 30), "Claude idle")
+    type_line("cc24", f"/relay-link --as implementer {label}")
+    wait_until(lambda: q("SELECT 1 FROM links WHERE label=?", label), waiting("the link", 60), "the session linked")
+    wait_until(lambda: q("SELECT skip_next FROM links WHERE label=?", label)[0]["skip_next"] == 0,
+               waiting("the /relay-link turn's Stop hook", 90), "the /relay-link turn's Stop hook ran")
+    wait_until(lambda: "esc to interrupt" not in screen("cc24"), waiting("Claude idle", 30), "Claude idle")
+    ack = wait_until(lambda: command_result(since), waiting("Claude's reply to /relay-link", 60),
+                     "Claude's reply to /relay-link")[1]
+    check("Linked this session" in ack, f"Claude's latest reply is the acknowledgement: {ack!r}")
+    check(not handoffs(label), "the acknowledgement turn was not reported")
+    type_line("cc24", f"/relay-review --as implementer {label}")
+    states = ("assessing", "review_ready", "no_draft")
+    h1 = wait_handoff(label, states, timeout=waiting("the one-off hand-off", 150))
+    check("T24-CLOSEOUT" in h1["claude_message"] and "Linked this session" not in h1["claude_message"],
+          f"H{h1['id']} carries the reply from before the link, not the acknowledgement: {h1['claude_message']!r}")
+    check(h1["display_name"] == "implementer", "it was reported as implementer")
+    output = command_result(since)[0]
+    check(output.startswith("Forwarding the previous reply") and f"stays linked to '{label}'" in output,
+          f"/relay-review said the session stays linked: {output!r}")
+    link = q("SELECT label, role, once, skip_next, once_message, once_label, once_role FROM links WHERE session_id=?",
+             h1["session_id"])
+    kept = {"label": label, "role": "implementer", "once": 0, "skip_next": 0, "once_message": None,
+            "once_label": None, "once_role": None}
+    check(link == [kept], f"the session is still linked as it was, with the one-off cleared: {link}")
+    keys("cc24", "Escape")  # release the hold, as the user can, so the session has a next ordinary turn
+    wait_until(lambda: not pid_alive(h1["hook_pid"]), waiting("the hold released by Esc", 30), "the hold released by Esc")
+    wait_until(lambda: "esc to interrupt" not in screen("cc24"), waiting("Claude idle", 30), "Claude idle")
+    claude_say("cc24", "Reply with just: T24-NEXT")
+    h2 = wait_handoff(label, states, after_id=h1["id"], timeout=waiting("the next reply's hand-off", 150))
+    check("T24-NEXT" in h2["claude_message"], f"the next ordinary reply was reported as H{h2['id']}")
+    check((h2["session_id"], h2["display_name"], h2["thread_id"]) == (h1["session_id"], "implementer", h1["thread_id"]),
+          "by the same session, as implementer, into the same conversation")
+    check(q("SELECT label, role FROM links WHERE session_id=?", h1["session_id"]) == [{"label": label, "role": "implementer"}],
+          "and the session is still linked")
+    return [f"after /relay-link's acknowledgement, /relay-review forwarded the earlier reply as H{h1['id']} "
+            f"({h1['claude_message']!r}) and left the link as it was; /relay-review printed {output!r}",
+            f"after Esc released the hold, the next ordinary reply was reported as H{h2['id']} under the same label "
+            "and role, in the same conversation"]
+
+
 ALL = [t01_exact_text, t02_correct_session, t03_instruction, t04_no_duplicates, t05_visible_failure,
        t06_esc, t07_open_window_cycle, t08_menu_survival, t09_escalation, t10_loaded_guard, t11_no_draft,
        e1_claude_killed, e2_consecutive_sends, t14_queued_behind_menu, t15_same_ticket, t16_standing_context,
        t17_permission, t18_long_labels, t19_link_creates_conversation, t20_review_once_creates_conversation,
-       t21_copied_draft, t22_refresh_existing_conversation, t23_refresh_for_no_reply]
+       t21_copied_draft, t22_refresh_existing_conversation, t23_refresh_for_no_reply,
+       t24_review_once_in_a_linked_session]
 # 12 = E1, 13 = E2 (extra checks; design test 12 is the dev-box check). 14-18 are the cross-session checks of #8.
 # 19-20 check #9: the conversation is created by /relay-link and /relay-review.
 # 21-22 check #2: a copied draft of 8 KB or more delivered byte-exact, and what refreshes an existing conversation.
 # 23 checks #3: after the documented server refresh, an older conversation lists the no-reply tool.
+# 24 checks #5: /relay-review after /relay-link forwards the earlier reply and leaves the session linked.

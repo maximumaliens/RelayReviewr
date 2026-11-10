@@ -211,6 +211,21 @@ class TheSessionsOwnLink(ReviewOnceCase):
         self.assertIn("couldn't be created yet", out)
         self.assertNotIn("\n", out, "one line: the command file has Claude echo the line verbatim")
 
+    def test_a_one_off_skipped_for_background_tasks_is_dropped_and_the_link_carries_on(self):
+        self.said("build it", "BUILD-CLOSEOUT")
+        self.command("relay-link", "--as", "implementer", "T-1")
+        self.command("relay-review", "--as", "verifier", "T-2", background_tasks=[{"id": "b1"}])
+        self.assertEqual(self.forwarded, [], "a turn that ends with background tasks running isn't forwarded")
+        told = (self.root / "state" / "notifications.log").read_text()
+        self.assertIn("T-2: verifier one-off review skipped", told)
+        self.assertIn("background tasks", told)
+        self.assertIn("/relay-review again", told)
+        self.assertIn("stays linked to 'T-1'", told)
+        self.end_turn(SESSION, "NEXT-REPLY")
+        self.assertEqual(len(self.forwarded), 1, "the skipped one-off isn't sent later in the next reply's place")
+        self.assertIn("NEXT-REPLY", self.forwarded[0])
+        self.assertIn("ticket T-1 · from implementer", self.forwarded[0])
+
     def test_an_unlinked_session_is_still_unlinked_after_a_one_off(self):
         self.said("build it", "BUILD-CLOSEOUT")
         out = self.command("relay-review", "T-1")
