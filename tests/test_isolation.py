@@ -294,10 +294,6 @@ class RefuseInstalledPaths(unittest.TestCase):
         isolation.refuse_installed(pathlib.Path(tempfile.gettempdir()) / "relay-accept" / "relay")
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
-
 class CodeUnderTest(unittest.TestCase):
     """Each acceptance summary names the commit it ran and whether the tree had uncommitted changes (#9)."""
 
@@ -343,3 +339,7 @@ class CodeUnderTest(unittest.TestCase):
             state = isolation.code_state(other)
         self.assertEqual(state, (None, None))
         self.assertIn("unknown", isolation.describe_code(state))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

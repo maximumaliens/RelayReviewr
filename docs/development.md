@@ -12,7 +12,7 @@ Take care with your own Claude sessions while you develop: a session linked to t
 
 `python3 -m unittest discover -s tests -p 'test_*.py'`. They need no sign-ins and use fakes for Claude and Codex; `tests/support.py` holds the shared test seams. CI runs them on every push and pull request.
 
-To run one test file, use `discover` with the file name as the pattern: `python3 -m unittest discover -s tests -p 'test_x.py'`. (`python3 -m unittest tests/test_x.py` fails with `No module named 'support'`.) Select tests by name with `-k`, which matches a substring of the test's full name and can be repeated: `python3 -m unittest discover -s tests -p 'test_x.py' -k copies_the_exact_draft`.
+To run one test file, use `discover` with the file name as the pattern: `python3 -m unittest discover -s tests -p 'test_x.py'`. (`python3 -m unittest tests/test_x.py` fails with `No module named 'support'`.) Select tests by name with `-k`, which matches a substring of the test's full name and can be repeated: `python3 -m unittest discover -s tests -p 'test_ticket_sessions.py' -k copies_the_exact_draft`.
 
 Unit tests never use the real clipboard or Windows toasts. `RelayCase` takes `powershell.exe` and `clip.exe` off `PATH` for the test and every process it starts (such as the waiting hook), and a test that launches either by path fails. A test that checks Copy calls `self.fake_clipboard()` and asserts on the file it returns. Notices are still written to `notifications.log`. To also check that the relay's wording names no particular person or project, pass the names as a regex, which keeps them out of the repository: `RELAY_PRIVATE_NAMES='alice|acme' python3 -m unittest discover -s tests -p 'test_*.py'`.
 
