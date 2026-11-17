@@ -4,6 +4,11 @@ Notable changes to the relay. Releases before this file are described on the Git
 
 ## Unreleased
 
+## v0.2.1 (2026-11-17)
+
+### Upgrading (do this: it's a security fix)
+With no session held: `git pull` in your installed checkout, then `bin/relay install-claude` and `relay install-codex`. Then type `/status` in each reviewer Codex window: it should show "Permissions: Read Only".
+
 ### Changed
 - **Acceptance tests 7, 8 and 10 report something worth a reply (#17).** They need Codex's own draft to Send, but their reports were bare acknowledgements, which Codex correctly answers with the no-reply menu. They now report a claim the repository contradicts, and are INCONCLUSIVE, not failed, if Codex still stores no draft. `CLAUDE.md` gives the `gh issue view` command for reading a ticket, and `docs/development.md` leaves the list of checks to `docs/acceptance-results.md`.
 - The tests workflow's GitHub token is limited to reading the repository (`permissions: contents: read`), closing code-scanning alert 1.
