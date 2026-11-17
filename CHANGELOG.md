@@ -4,6 +4,9 @@ Notable changes to the relay. Releases before this file are described on the Git
 
 ## Unreleased
 
+### Changed
+- The tests workflow's GitHub token is limited to reading the repository (`permissions: contents: read`), closing code-scanning alert 1.
+
 ## v0.2.0 (2026-11-11)
 
 ### Added
