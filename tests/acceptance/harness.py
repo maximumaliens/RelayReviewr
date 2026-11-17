@@ -278,12 +278,19 @@ def codex_open_by_hand(name, tid):
 
 
 def permissions_shown(name):
-    """What Codex's `/status`, typed in a window whose composer is free, shows for Permissions."""
-    seen = screen(name).count("Permissions:")
+    """What Codex's `/status`, typed in a window whose composer is free, shows for Permissions: the line in the
+    block under the last `/status` on screen. An earlier block may have scrolled off or still be showing, so
+    lines aren't counted; the pause lets the new block be drawn before the last one is read."""
     type_line(name, "/status")
-    wait_until(lambda: screen(name).count("Permissions:") > seen, 30, f"{name} /status")
-    line = [ln for ln in screen(name).splitlines() if ln.strip().startswith("Permissions:")][-1]
-    return " ".join(line.split()[1:])
+    time.sleep(2)
+
+    def latest():
+        lines = [ln.strip() for ln in screen(name).splitlines()]
+        if "/status" not in lines:
+            return None
+        block = lines[len(lines) - lines[::-1].index("/status"):]
+        return next((ln for ln in block if ln.startswith("Permissions:")), None)
+    return " ".join(wait_until(latest, 30, f"{name} /status").split()[1:])
 
 
 def menu_options(name):

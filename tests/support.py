@@ -94,7 +94,10 @@ class FakeCodex:
     settings update records its sandbox. A resume that names a sandbox records it only when it changes what is
     live or loads the conversation. A resume that names none keeps what is live, or loads the conversation with
     what is recorded, else with the trusted-project default, workspace-write. `restart()` unloads everything.
-    Set `resume_sandbox` to answer every resume with that sandbox, whatever was asked."""
+    Set `resume_sandbox` to answer every resume with that sandbox, whatever was asked or updated. Set
+    `resume_keeps_live` for a resume that leaves a loaded conversation's sandbox as it is, so that only a
+    settings update changes it: what the development daemon did for a conversation with a writable window
+    attached."""
 
     READ_ONLY = {"type": "readOnly", "networkAccess": False}
     WORKSPACE_WRITE = {"type": "workspaceWrite", "writableRoots": [], "networkAccess": False,
@@ -106,7 +109,7 @@ class FakeCodex:
         self.busy, self.queues, self.texts, self.fail = set(), {}, [], None
         self.instructions, self.calls = [], []
         self.started, self.unnamed, self.unloaded = [], set(), set()
-        self.sandbox, self.recorded, self.resume_sandbox = {}, {}, None
+        self.sandbox, self.recorded, self.resume_sandbox, self.resume_keeps_live = {}, {}, None, False
 
     def restart(self):
         """The daemon restarts: nothing is loaded, and only what was recorded survives."""
@@ -156,6 +159,8 @@ class FakeCodex:
         self.unloaded.discard(thread_id)
         live = self.sandbox.get(thread_id)
         asked = self.SANDBOXES[params["sandbox"]] if params.get("sandbox") else None
+        if self.resume_keeps_live and live:
+            asked = None
         self.sandbox[thread_id] = asked or live or self.recorded.get(thread_id) or self.WORKSPACE_WRITE
         if self.sandbox[thread_id] != live:  # it loaded the conversation or changed what is live
             self.recorded[thread_id] = self.sandbox[thread_id]

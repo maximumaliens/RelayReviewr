@@ -84,8 +84,47 @@ class BeforeAReportIsQueued(ReadOnlyCase):
                          {True})
 
 
+class AResumeThatLeavesWriteAccess(ReadOnlyCase):
+    """Codex answers the relay's read-only resume with workspace-write: the relay applies the settings update
+    and asks again before it sends anything."""
+
+    def setUp(self):
+        super().setUp()
+        self.link()
+        self.codex.sandbox["thread-1"] = FakeCodex.WORKSPACE_WRITE  # as a window opened by hand left it
+        self.codex.resume_keeps_live = True
+        self.codex.calls.clear()
+
+    def test_the_settings_update_makes_it_read_only_and_the_report_is_queued(self):
+        h = self.run_stop_hook(SESSION, linked_in=self.repo)
+        self.assertEqual(h["status"], "assessing")
+        self.assertEqual(len(self.codex.texts), 1)
+        self.assertEqual(self.codex.sandbox["thread-1"], FakeCodex.READ_ONLY)
+
+    def test_the_update_and_the_second_check_come_before_the_report(self):
+        self.run_stop_hook(SESSION, linked_in=self.repo)
+        methods = [m for m, _ in self.codex.calls if m in ("thread/resume", "thread/settings/update", "thread/queue/add")]
+        self.assertEqual(methods[:3], ["thread/resume", "thread/settings/update", "thread/resume"])
+        self.assertEqual(methods[-1], "thread/queue/add")
+        update = self.codex.sent("thread/settings/update")[0]
+        self.assertEqual((update["threadId"], update["sandboxPolicy"], update["approvalPolicy"]),
+                         ("thread-1", FakeCodex.READ_ONLY, "on-request"))
+
+    def test_a_conversation_already_read_only_gets_no_settings_update(self):
+        self.codex.sandbox["thread-1"] = FakeCodex.READ_ONLY
+        self.run_stop_hook(SESSION, linked_in=self.repo)
+        self.assertEqual(self.codex.sent("thread/settings/update"), [])
+
+    def test_relay_review_opens_it_once_the_update_has_made_it_read_only(self):
+        with self.codex.installed(), mock.patch.object(os, "getcwd", return_value=str(self.repo)), \
+                mock.patch.object(os, "chdir"), mock.patch.object(os, "execvpe") as execvpe:
+            cli.review(["T-1"])
+        self.assertTrue(execvpe.called)
+        self.assertEqual(self.codex.sandbox["thread-1"], FakeCodex.READ_ONLY)
+
+
 class AConversationCodexDoesNotMakeReadOnly(ReadOnlyCase):
-    """Codex answers the relay's read-only resume with workspace-write."""
+    """Codex answers the relay's read-only resume with workspace-write, also after the settings update."""
 
     def setUp(self):
         super().setUp()
@@ -99,6 +138,7 @@ class AConversationCodexDoesNotMakeReadOnly(ReadOnlyCase):
     def test_a_report_is_not_queued_and_its_hand_off_fails_with_a_notification(self):
         h = self.run_stop_hook(SESSION, linked_in=self.repo)
         self.assertEqual(self.codex.texts, [], "nothing was queued")
+        self.assertEqual(len(self.codex.sent("thread/settings/update")), 2, "tried once, after the one at creation")
         self.assertEqual(h["status"], "failed")
         self.assertIn("this conversation is not read-only", h["reason"])
         self.assertIn(f"report H{h['id']}: assessment failed: this conversation is not read-only", self.notifications())

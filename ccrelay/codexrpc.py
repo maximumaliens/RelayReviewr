@@ -174,19 +174,39 @@ def start_thread(cfg, cwd, instructions, name):
     }, timeout=60)
     thread_id = result["thread"]["id"]
     call(cfg, "thread/name/set", {"threadId": thread_id, "name": name})
-    call(cfg, "thread/settings/update", {"threadId": thread_id, "approvalPolicy": approval_param(cfg),
-                                         "sandboxPolicy": {"type": "readOnly", "networkAccess": False}})
+    update_to_read_only(cfg, thread_id)
     return thread_id
 
 
-def set_read_only(cfg, thread_id):
-    """Set the conversation read-only, loading it if it isn't loaded, and confirm both. Every resume the relay
-    sends names read-only: one that names no sandbox can apply the Codex home's default instead. It is sent to
-    a loaded conversation too, which is how one left with write access becomes read-only, and its reply is the
+def update_to_read_only(cfg, thread_id):
+    """Have Codex apply and record read-only for a loaded conversation that has a session file."""
+    call(cfg, "thread/settings/update", {"threadId": thread_id, "approvalPolicy": approval_param(cfg),
+                                         "sandboxPolicy": {"type": "readOnly", "networkAccess": False}})
+
+
+def resume_read_only(cfg, thread_id):
+    """Resume the conversation naming read-only, which loads it if it isn't loaded, and return the sandbox Codex
+    then reports for it ("readOnly", "workspaceWrite", …; None if it reports none). Every resume the relay sends
+    is this one: a resume that names no sandbox can apply the Codex home's default instead. Its reply is the
     only place Codex reports a conversation's sandbox."""
     result = call(cfg, "thread/resume", {"threadId": thread_id, "excludeTurns": True, "sandbox": "read-only",
                                          "approvalPolicy": approval_param(cfg)}, timeout=60) or {}
-    sandbox = (result.get("sandbox") or {}).get("type")
+    return (result.get("sandbox") or {}).get("type")
+
+
+def set_read_only(cfg, thread_id):
+    """Set the conversation read-only, loading it if it isn't loaded, and confirm both. The resume is sent to a
+    loaded conversation too, which is how one left with write access becomes read-only. If Codex still reports
+    another sandbox, the relay applies the settings update and asks again; only a conversation that is still
+    not read-only after that is refused (NotReadOnly)."""
+    sandbox = resume_read_only(cfg, thread_id)
+    if sandbox != "readOnly":
+        try:
+            update_to_read_only(cfg, thread_id)
+        except CodexError as e:
+            raise NotReadOnly(f"this conversation is not read-only (Codex reports {sandbox or 'no sandbox'}, and "
+                              f"the settings update failed: {e})") from e
+        sandbox = resume_read_only(cfg, thread_id)
     if sandbox != "readOnly":
         raise NotReadOnly(f"this conversation is not read-only (Codex reports {sandbox or 'no sandbox'})")
     if thread_id not in loaded_threads(cfg):

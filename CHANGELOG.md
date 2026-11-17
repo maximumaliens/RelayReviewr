@@ -12,7 +12,7 @@ Notable changes to the relay. Releases before this file are described on the Git
 ### Fixed
 - **Reviewer conversations could run with write access (#13, critical).** A conversation created by `/relay-link` and opened in a Codex window before its first report, or reloaded after a daemon restart, got Codex's default for a trusted project, workspace-write, and kept it for every turn. Now:
   - the relay has Codex record read-only when it creates a conversation, and names read-only every time it loads one;
-  - it sets a conversation read-only before each report, when a session links, and when `relay review` opens it, and `relay review` opens the window with `-s read-only`;
+  - it sets a conversation read-only before each report, when a session links, and when `relay review` opens it, and `relay review` opens the window with `-s read-only`. A conversation with a writable Codex window still open on it is changed too, and the window then shows Read Only;
   - `relay install-codex` makes read-only the reviewer Codex home's default sandbox. Run it again after updating. A `sandbox_mode` line of your own in that file is commented out, and the command says so;
   - if Codex doesn't confirm a conversation is read-only, the relay queues nothing into it, marks the report failed with a notification, and `relay review` refuses to open it.
 

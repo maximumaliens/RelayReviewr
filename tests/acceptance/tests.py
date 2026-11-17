@@ -3,6 +3,7 @@ import json
 import os
 import pathlib
 import random
+import re
 import signal
 import subprocess
 import time
@@ -1403,29 +1404,32 @@ def old_style_conversation(cfg, name):
 def t28_existing_write_conversations_become_read_only():
     """#13: conversations left with write access by the fault become read-only with no step by the user: at
     their next report, when a session links to them, and when `relay review` opens them. The Codex config is the
-    one from before #13 throughout, so only the relay's own resume changes them. Five are made the way the fault
+    one from before #13 throughout, so only the relay's own resume changes them. Six are made the way the fault
     made them (created the old way, then reloaded after a daemon restart by a resume that names no sandbox).
-    For the reports: one that then ran a turn with write access and is loaded, one that ran such a turn and is
-    not loaded when the report arrives, and one that never ran a turn. A real session linked to the ticket
-    reports into each in turn; the harness points the ticket's stored conversation at it, as a session linked
-    before the upgrade would find it. The other two never ran a turn: one is the ticket's conversation when the
-    session links, and one is opened with `relay review`."""
+    For the reports: one that then ran a turn with write access and is loaded, one that never ran a turn, one
+    that ran a write turn and has a writable window open on it (opened by hand, `/status` showing Workspace)
+    which stays open while the report arrives and must show it (with a window attached, the relay's resume
+    alone leaves write access; its settings update is what changes it), and one that ran a write turn and is
+    not loaded when the report arrives. A real session linked to the ticket reports into each in turn; the harness points
+    the ticket's stored conversation at it, as a session linked before the upgrade would find it. The other two
+    never ran a turn: one is the ticket's conversation when the session links, and one is opened with
+    `relay review`."""
     from ccrelay import codexrpc
     label = f"T28-{TAG}"
     without_read_only_default()
     cfg = store.load_config()
     codexrpc.ensure_daemon(cfg)
-    ran_loaded, ran_unloaded, never_ran, at_link, by_review = (old_style_conversation(cfg, f"{label}-{n}")
-                                                               for n in "abcde")
+    ran_loaded, ran_unloaded, never_ran, at_link, by_review, in_window = (
+        old_style_conversation(cfg, f"{label}-{n}") for n in "abcdef")
     stop_daemon()
     codexrpc.ensure_daemon(cfg)
-    for tid in (ran_loaded, ran_unloaded, never_ran, at_link, by_review):
+    for tid in (ran_loaded, ran_unloaded, never_ran, at_link, by_review, in_window):
         check(sandbox_on_plain_resume(tid) == "workspaceWrite",
               f"the fault reproduced: {tid[-6:]}, created read-only the old way, has write access after a reload "
               "that names no sandbox")
-    for tid in (ran_loaded, ran_unloaded):
+    for tid in (ran_loaded, ran_unloaded, in_window):
         codexrpc.queue_message(cfg, tid, "Reply with just: OK. Call no tool.", f"t28-{tid[-6:]}")
-    for tid in (ran_loaded, ran_unloaded):
+    for tid in (ran_loaded, ran_unloaded, in_window):
         wait_until(lambda: turn_sandboxes(tid) and codexrpc.thread_status(cfg, tid) == "idle", 180,
                    f"{tid[-6:]} ran a turn")
         check(turn_sandboxes(tid) == ["workspace-write"], f"{tid[-6:]} ran a turn with write access: {turn_sandboxes(tid)}")
@@ -1464,11 +1468,31 @@ def t28_existing_write_conversations_become_read_only():
     c = turn_sandboxes(never_ran)
     check(c == ["read-only"], f"never run, already set to write: its first report ran read-only: {c}")
     release_with_esc("cc28", h)
+
+    codex_open_by_hand("cx28w", in_window)  # a writable window, left open while the next report arrives
+    time.sleep(5)
+    before = permissions_shown("cx28w")
+    check(before.startswith("Workspace"), f"/status in a window opened by hand on a write conversation: {before}")
+    h = next_report(in_window, "Reply with just: FOUR")
+    w = turn_sandboxes(in_window)
+    check(w == ["workspace-write", "read-only"],
+          f"a writable window open on it, had run a write turn: its next report ran read-only: {w}")
+    shown = wait_until(lambda: re.search(rf"\bH{h['id']}\b", screen("cx28w")), 60,
+                       f"H{h['id']} shown in the window that was left open")
+    check(shown, f"H{h['id']} ran in the same window, which was writable when the report arrived")
+    release_with_esc("cc28", h)
+    wait_until(lambda: menu_options("cx28w") is None and codexrpc.thread_status(cfg, in_window) == "idle", 120,
+               "the window's composer free after the release")
+    after = permissions_shown("cx28w")
+    check(after.startswith("Read Only"), f"/status in that same window after the report: {after}")
+    check(sandbox_on_plain_resume(in_window) == "readOnly", "and Codex reports the conversation read-only")
+    kill_session("cx28w")
+
     stop_daemon()
     h = next_report(ran_unloaded, "Reply with just: THREE")
     b = turn_sandboxes(ran_unloaded)
     check(b == ["workspace-write", "read-only"], f"not loaded, had run a write turn: its next report ran read-only: {b}")
-    for tid in (ran_loaded, never_ran, at_link, by_review):
+    for tid in (ran_loaded, never_ran, at_link, by_review, in_window):
         check(sandbox_on_plain_resume(tid) == "readOnly",
               f"{tid[-6:]} is still read-only after that daemon restart, on a reload that names no sandbox")
     return [f"a loaded conversation that had run a write turn: turn contexts {a}",
@@ -1477,7 +1501,10 @@ def t28_existing_write_conversations_become_read_only():
             "each became read-only at its next report with no other step; the Codex config had no read-only default",
             "a never-run write conversation became read-only when a session linked to its ticket, and another when "
             f"relay review opened it (/status: 'Permissions: {perms}')",
-            "after a later daemon restart the four still loaded before it were read-only on a reload naming no sandbox"]
+            f"a conversation with a writable window left open on it (/status before: 'Permissions: {before}'): its "
+            f"next report ran in that window, read-only: turn contexts {w}; the window's /status afterwards: "
+            f"'Permissions: {after}'",
+            "after a later daemon restart the five still loaded before it were read-only on a reload naming no sandbox"]
 
 
 ALL = [t01_exact_text, t02_correct_session, t03_instruction, t04_no_duplicates, t05_visible_failure,

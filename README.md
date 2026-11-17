@@ -166,7 +166,7 @@ Claude Code shows a delivered draft as **"Stop hook error: …"**. That's Claude
 
 ### After you update the relay: what an existing conversation picks up
 
-**Read-only.** Versions up to v0.2.0 could leave a conversation with write access: `/status` showed "Permissions: Workspace". After updating, run `relay install-codex` again, which makes read-only the reviewer's default. An existing conversation becomes read-only at its next report or the next time you open it with `relay review`; you don't need to do anything to it. Until one of those happens, don't type requests into a conversation whose `/status` doesn't show Read Only.
+**Read-only.** Versions up to v0.2.0 could leave a conversation with write access: `/status` showed "Permissions: Workspace". After updating, run `relay install-codex` again, which makes read-only the reviewer's default. An existing conversation becomes read-only at its next report or the next time you open it with `relay review`; you don't need to do anything to it, and a Codex window you left open on it changes to Read Only with that report. Until one of those happens, don't type requests into a conversation whose `/status` doesn't show Read Only.
 
 A new version adds a tool (`no_reply_menu`) and revises tool descriptions, which live in the tool server. Reopening the conversation in a Codex window (`relay review <ticket>`, then wait about 15 s for it to attach) or restarting the Codex daemon replaced the tool server in testing; in acceptance test 23 an existing conversation then listed the new tool, real Codex called it when asked, and a Discuss choice returned the revised guidance (one run, one Codex version; see DESIGN.md). Whether Codex chooses it unprompted wasn't tested. The guidance in the operating instructions about the no-reply path and Discuss keeping Claude held reaches only conversations created after the update; the short line in each report's header carries the no-reply hint to older ones. Update the relay when no session is held. The procedure doesn't refresh creation-time operating instructions.
 
@@ -202,7 +202,7 @@ The relay notifies you when a review is ready, when a report is queued behind an
 | `relay review` says no conversation, or lists several projects | Check the label's spelling, or run it from inside the project's folder. |
 | Codex asks permission to run a command | Decline it. Codex reviews read-only and is told never to ask. |
 | "Assessment failed: this conversation is not read-only", or `relay review` or `/relay-link` says the conversation is not read-only | Codex didn't confirm the conversation is read-only when the relay asked, so the relay sent it nothing and Claude was released. Check that the reviewer Codex is up to date and run `relay install-codex` again, then retry. If it still refuses, link the session to a new ticket label, which starts a new conversation. |
-| `/status` in a Codex window shows "Permissions: Workspace", not "Read Only" | The conversation has write access (see *After you update the relay*). Close the window and open it with `relay review "<label>"`, which sets it read-only first. |
+| `/status` in a Codex window shows "Permissions: Workspace", not "Read Only" | The conversation has write access (see *After you update the relay*). Its next report sets it read-only, also with the window open. To change it now, close the window and open it with `relay review "<label>"`, which sets it read-only first. |
 | Anything else | Collect the output of `relay status` and what both terminals show. |
 
 ## Files and commands

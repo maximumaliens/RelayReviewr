@@ -77,17 +77,40 @@ class SetReadOnlyTest(unittest.TestCase):
                                             "approvalPolicy": "on-request"}))
         self.assertEqual(call.call_args_list[1].args[1], "thread/loaded/list")
 
-    def test_a_workspace_write_reply_is_refused(self):
-        reply = self.resume_reply({"type": "workspaceWrite", "writableRoots": [], "networkAccess": False,
-                                   "excludeTmpdirEnvVar": False, "excludeSlashTmp": False},
-                                  {"id": ":workspace", "extends": None})
-        with mock.patch.object(codexrpc, "call", side_effect=[reply]):
+    WRITE = {"type": "workspaceWrite", "writableRoots": [], "networkAccess": False,
+             "excludeTmpdirEnvVar": False, "excludeSlashTmp": False}
+    UPDATE = {"threadId": THREAD_ID, "approvalPolicy": "on-request",
+              "sandboxPolicy": {"type": "readOnly", "networkAccess": False}}
+
+    def test_a_workspace_write_reply_gets_the_settings_update_and_a_second_check(self):
+        replies = [self.resume_reply(self.WRITE, {"id": ":workspace", "extends": None}), {},
+                   self.resume_reply({"type": "readOnly", "networkAccess": False}), {"data": [THREAD_ID]}]
+        with mock.patch.object(codexrpc, "call", side_effect=replies) as call:
+            codexrpc.set_read_only(self.CFG, THREAD_ID)
+        self.assertEqual([c.args[1] for c in call.call_args_list],
+                         ["thread/resume", "thread/settings/update", "thread/resume", "thread/loaded/list"])
+        self.assertEqual(call.call_args_list[1].args[2], self.UPDATE)
+        self.assertEqual(call.call_args_list[2].args[2]["sandbox"], "read-only")
+
+    def test_a_workspace_write_reply_after_the_settings_update_is_refused(self):
+        reply = self.resume_reply(self.WRITE, {"id": ":workspace", "extends": None})
+        with mock.patch.object(codexrpc, "call", side_effect=[reply, {}, reply]):
             with self.assertRaises(codexrpc.NotReadOnly) as refused:
                 codexrpc.set_read_only(self.CFG, THREAD_ID)
         self.assertEqual(str(refused.exception), "this conversation is not read-only (Codex reports workspaceWrite)")
 
+    def test_a_settings_update_that_fails_is_refused_as_not_read_only(self):
+        reply = self.resume_reply(self.WRITE)
+        failed = codexrpc.CodexError("thread/settings/update: method not found")
+        with mock.patch.object(codexrpc, "call", side_effect=[reply, failed]):
+            with self.assertRaises(codexrpc.NotReadOnly) as refused:
+                codexrpc.set_read_only(self.CFG, THREAD_ID)
+        self.assertIn("this conversation is not read-only (Codex reports workspaceWrite", str(refused.exception))
+        self.assertIn("method not found", str(refused.exception))
+
     def test_a_reply_that_reports_no_sandbox_is_refused(self):
-        with mock.patch.object(codexrpc, "call", side_effect=[{"thread": thread({"type": "idle"})}]):
+        bare = {"thread": thread({"type": "idle"})}
+        with mock.patch.object(codexrpc, "call", side_effect=[bare, {}, bare]):
             with self.assertRaises(codexrpc.NotReadOnly):
                 codexrpc.set_read_only(self.CFG, THREAD_ID)
 
