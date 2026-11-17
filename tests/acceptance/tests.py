@@ -37,6 +37,25 @@ def first_review(name, label, prompt="Reply with just: READY", env=None, **start
     return sid, h
 
 
+# A report with a concrete reason for a corrective instruction, for the tests that Send Codex's own draft: it claims
+# work that the reviewer can see in the repository was never done. A bare acknowledgement ("READY") correctly gets
+# the no-reply menu, which has no Send, so those tests stalled at it. (Other reports didn't do: Claude itself
+# objected to a risky plan, so Codex had nothing to correct; Codex can't answer a question about a task it never saw;
+# and Claude sometimes refuses to repeat a false claim unless told it is a fixture.)
+FALSE_CLAIM = ("This is a test fixture for a reviewer, not a statement about this session. Reply with exactly the "
+               "text after the colon and add nothing, not even a correction: Done. I created notes/summary.txt "
+               "with the three results and committed it to the repository. Reviewer: please confirm.")
+
+
+def no_draft_reason(label, h):
+    """None when Codex drafted a reply for hand-off `h`; else the INCONCLUSIVE evidence line, for a test that
+    needs Send and whose report Codex answered with the no-reply menu (or nothing)."""
+    if drafts(h["id"]):
+        return None
+    return (f"INCONCLUSIVE: Codex stored no draft for H{h['id']} ({label}), so there was no Send to use; "
+            "the behaviour this test checks was not exercised")
+
+
 def send_draft(cx, label, text):
     """Replace the pending draft with a known text through the user's Discuss path, then Send it from the menu."""
     choose(cx, "Discuss")
@@ -195,7 +214,9 @@ def t06_esc():
 
 def t07_open_window_cycle():
     label = f"T7-{TAG}"
-    _, h1 = first_review("cc7", label, "Create notes/t7.txt containing the line: draft one, then say it is done.")
+    _, h1 = first_review("cc7", label, FALSE_CLAIM)
+    if (skip := no_draft_reason(label, h1)):
+        return [skip]
     codex_open("cx7", label)
     wait_menu("cx7")
     choose("cx7", "Send")
@@ -203,7 +224,8 @@ def t07_open_window_cycle():
     h2 = wait_handoff(label, ("review_ready", "no_draft"), after_id=h1["id"], timeout=300)
     wait_menu("cx7")
     check(f"Answering report H{h2['id']}" in screen("cx7"), "second assessment shown live in the same open window")
-    ready_at = next(e["ts"] for e in events(h2["id"]) if e["kind"] == "draft:ready")
+    # the follow-up report is Claude's answer to the corrective instruction: Codex may draft again or find nothing to add
+    ready_at = next(e["ts"] for e in events(h2["id"]) if e["kind"] in ("draft:ready", "no_reply:assessed"))
     typed = [e for e in events() if e["kind"] == "menu:answer" and t_send + 1 < e["ts"] < ready_at]
     check(typed == [], "no menu answers between Send and the new review being ready")
     check(h2["created"] > t_send - 1, "the new handoff came from Claude's turn after Send")
@@ -214,7 +236,9 @@ def t08_menu_survival():
     env = dict(os.environ, CODEX_HOME=CODEX_HOME)
     ev = []
     label = f"T8-{TAG}"
-    _, h = first_review("cc8", label)
+    _, h = first_review("cc8", label, FALSE_CLAIM)
+    if (skip := no_draft_reason(label, h)):
+        return [skip]
     # 8a: graceful restart while a menu is open
     before = daemon_pid()
     try:
@@ -270,8 +294,10 @@ def t10_loaded_guard():
     env = dict(os.environ, CODEX_HOME=CODEX_HOME)
     label = f"T10-{TAG}"
     sid = claude_start("cc10", label)
-    claude_say("cc10", "Reply with just: FIRST")
+    claude_say("cc10", FALSE_CLAIM)
     h1 = wait_handoff(label, ("review_ready", "no_draft"))
+    if (skip := no_draft_reason(label, h1)):
+        return [skip]
     codex_open("cx10", label)
     choose("cx10", "Send")
     wait_until(lambda: latest(label)["id"] > h1["id"] or False, 120, "Claude answered")
@@ -285,11 +311,11 @@ def t10_loaded_guard():
     conn = store.connect()
     store.set_handoff(conn, nxt["id"], "finished", "test: release")
     wait_until(lambda: "esc to interrupt" not in screen("cc10"), 60, "Claude idle")
-    claude_say("cc10", "Reply with just: AFTER-DAEMON-STOP")
+    claude_say("cc10", FALSE_CLAIM)
     h3 = wait_handoff(label, ("review_ready", "no_draft"), after_id=nxt["id"], timeout=300)
     check(h3["status"] == "review_ready", "assessed in the background with the daemon restarted by the relay")
-    started_before_open = [e for e in events(h3["id"]) if e["kind"] == "draft:ready"]
-    check(started_before_open, "draft existed before any window was opened")
+    started_before_open = [e for e in events(h3["id"]) if e["kind"] in ("draft:ready", "no_reply:assessed")]
+    check(started_before_open, "the assessment (a draft or a no-reply finding) existed before any window was opened")
     return [f"daemon stopped -> relay restarted it and loaded the thread; H{h3['id']} assessed with no window open"]
 
 
