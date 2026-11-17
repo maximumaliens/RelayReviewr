@@ -360,12 +360,13 @@ Everything here was run in the isolated development environment (Codex CLI 0.166
 
 ### Live checks
 
-Acceptance tests 26–28, run against `d2651b1` in the isolated environment (`results/20261117-204659`), all pass, with the installed store unchanged. Each reads the sandbox of every turn from the turn contexts in the conversation's session file. [tested, one run on the final code and one before the code review's changes; one pair of Codex versions]
+Acceptance tests 26–28, run against `597c914` in the isolated environment (`results/20261117-215546`), all pass, with the installed store unchanged. They also passed against `d2651b1` (`results/20261117-204659`), before the settings update on a resume that leaves write access and before test 28's open-window case. Each reads the sandbox of every turn from the turn contexts in the conversation's session file. [tested; one pair of Codex versions]
 
 - **26.** `/relay-link`, then `relay review` before any report: `/status` showed "Permissions: Read Only (Ask for approval)". The relay's resume was sent during the first turn and three times while its menu was open; the menu stayed in the window and was answered there; both turns were read-only.
 - **27**, on a Codex config with no read-only default. `/relay-link`, then a plain `codex resume <id>` by hand: Read Only. After a daemon restart, a reload that names no sandbox: read-only. The first report after another restart, and a later one with a by-hand window open: both turns read-only.
   - *Control* (`results/20261117-202901`): with the settings update at creation removed, the same test failed at its first step with "Permissions: Workspace (Ask for approval)".
-- **28**, on the same config. Five conversations made the way the fault made them all reported workspace-write, and two ran a turn recorded as workspace-write. The next report into each of three ran read-only; one became read-only at a link and one at `relay review`.
+- **28**, on the same config. Six conversations made the way the fault made them all reported workspace-write, and three ran a turn recorded as workspace-write. The next report into each of four ran read-only; one became read-only at a link and one at `relay review`.
+  - *A writable window left open.* One of the four had a window opened by hand on it, showing "Permissions: Workspace (Ask for approval)", which stayed open. Its next report was shown in that window, its turn context was read-only after the earlier workspace-write one, and `/status` in the same window then showed "Permissions: Read Only (Ask for approval)".
 
 ### Limits
 
