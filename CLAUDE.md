@@ -2,7 +2,7 @@
 
 ### Issue tracker
 
-Issues live in this repository's GitHub Issues, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Issues live in this repository's GitHub Issues, via the `gh` CLI. Read one with `gh issue view <number> --json number,title,body,labels,comments`. The other conventions are in `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

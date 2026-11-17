@@ -5,6 +5,7 @@ Notable changes to the relay. Releases before this file are described on the Git
 ## Unreleased
 
 ### Changed
+- **Acceptance tests 7, 8 and 10 report something worth a reply (#17).** They need Codex's own draft to Send, but their reports were bare acknowledgements, which Codex correctly answers with the no-reply menu. They now report a claim the repository contradicts, and are INCONCLUSIVE, not failed, if Codex still stores no draft. `CLAUDE.md` gives the `gh issue view` command for reading a ticket, and `docs/development.md` leaves the list of checks to `docs/acceptance-results.md`.
 - The tests workflow's GitHub token is limited to reading the repository (`permissions: contents: read`), closing code-scanning alert 1.
 - Unit tests are kept from a real Codex daemon: the fake Codex stands at the relay's requests, a test without it gets "no Codex daemon" instead of the installed reviewer's socket, and the waiting hook a test starts is given an empty Codex home.
 - `relay install-codex` writes nothing, and says why, if your own lines in the reviewer config would leave a file that isn't valid TOML.
