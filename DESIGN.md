@@ -356,6 +356,15 @@ Everything here was run in the isolated development environment (Codex CLI 0.166
 - **Upgrading while sessions are held.** Nothing a held session's hook polls or writes changes. A report an older hook already queued runs under whatever its conversation had; the next report, filed by a new hook process, sets read-only first. The menu server sends no resume. [source]
 - **Unit seam.** The fake Codex now stands at `codexrpc.call`, so the relay's own client code runs in every test that uses it. It records each request with its parameters and keeps a live and a recorded sandbox per conversation, following the probes above. `RelayCase` also keeps its tests from a real daemon, because the default Codex home is the installed reviewer's: in the test's own process the relay's requests fail as an absent daemon's do unless the fake is installed, and the waiting hook a test starts as a child process is given an empty Codex home.
 
+### Live checks
+
+Acceptance tests 26–28, run against `d2651b1` in the isolated environment (`results/20261117-204659`), all pass, with the installed store unchanged. Each reads the sandbox of every turn from the turn contexts in the conversation's session file. [tested, one run on the final code and one before the code review's changes; one pair of Codex versions]
+
+- **26.** `/relay-link`, then `relay review` before any report: `/status` showed "Permissions: Read Only (Ask for approval)". The relay's resume was sent during the first turn and three times while its menu was open; the menu stayed in the window and was answered there; both turns were read-only.
+- **27**, on a Codex config with no read-only default. `/relay-link`, then a plain `codex resume <id>` by hand: Read Only. After a daemon restart, a reload that names no sandbox: read-only. The first report after another restart, and a later one with a by-hand window open: both turns read-only.
+  - *Control* (`results/20261117-202901`): with the settings update at creation removed, the same test failed at its first step with "Permissions: Workspace (Ask for approval)".
+- **28**, on the same config. Five conversations made the way the fault made them all reported workspace-write, and two ran a turn recorded as workspace-write. The next report into each of three ran read-only; one became read-only at a link and one at `relay review`.
+
 ### Limits
 
 - **A conversation from before the fix that has never run a turn and is still loaded** has nothing recorded, and the relay's read-only resume records nothing for it while it stays loaded and read-only. Its first report records read-only (every turn does). If the daemon restarts first and the user opens it by hand, the config default decides: read-only once `install-codex` has been run again. [source: follows from the probes; not run as its own case]
