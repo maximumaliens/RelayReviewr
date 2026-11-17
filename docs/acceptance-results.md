@@ -2,7 +2,7 @@
 
 The acceptance tests in `tests/acceptance/` drive real, interactive Claude Code and Codex windows in an isolated environment (see [development.md](development.md)). Each run writes its raw evidence to `results/<run-id>/`, which is not kept in this repository.
 
-On the code this repository was published from, every automated check below passed in the isolated environment, with the installed relay's store unchanged. The checks marked *by hand* were done by a person watching.
+On the code this repository was published from, every automated check below passed in the isolated environment (tests 7, 8 and 10 are INCONCLUSIVE when Codex stores no draft; see the note under the table), with the installed relay's store unchanged. The checks marked *by hand* were done by a person watching.
 
 | # | Check | What it shows |
 |---|---|---|
@@ -14,7 +14,7 @@ On the code this repository was published from, every automated check below pass
 | 5 | Visible failure | A killed hook, a changed hook format and an ended session each give a visible reason; nothing is sent. |
 | 6 | Esc | Esc in Claude releases the wait; Send is withdrawn. |
 | 7 | Open-window cycle | PASS in `20261117-232306` (commit `ed78ba6`), installed store unchanged. Codex drafted a reply to a report claiming a commit that doesn't exist; Send, Claude worked, and the next review appeared in the same open Codex window in 19 s with no menu answer typed in between. |
-| 8 | Menu survival | PASS in `20261117-232306` (commit `ed78ba6`), installed store unchanged. The graceful restart with a menu open did not finish within 45 s and the daemon kept its pid. After the daemon was killed, Claude stayed held; reopening the conversation did **not** show the menu, and it came back only when Codex was asked for it (`show_menu`); Send then delivered the draft. |
+| 8 | Menu survival | PASS in `20261117-232306` (commit `ed78ba6`), installed store unchanged. The graceful restart with a menu open did not finish within 45 s and the daemon kept its pid. After the daemon was killed, Claude stayed held; reopening the conversation did **not** show the menu, and it came back only when Codex was asked for it (`show_menu`); Send then delivered the draft. The test accepts either outcome, so this is a finding and not a failure: the menu is not restored by reopening. |
 | 9 | Escalation prompts | Under `on-request`, Codex stayed in the read-only sandbox and asked for no escalation (one sample). |
 | 10 | Thread-loaded guard | PASS in `20261117-232306` (commit `ed78ba6`), installed store unchanged. After a Send and Claude's next report, with the daemon stopped, the relay restarted it, loaded the conversation and assessed the next report with no window open. |
 | 11 | No-draft detector | When Codex ends a turn without a draft, the user is notified and Claude stays held. |
@@ -39,6 +39,6 @@ On the code this repository was published from, every automated check below pass
 
 **Known gap:** Windows toasts were not seen on the test machine, because Windows had toasts switched off for the PowerShell sender the relay uses (see DESIGN.md, Build findings 2026-10-31). Notifications are still written to the log.
 
-Tests 7, 8 and 10 expect a draft, so each reports a claim the repository contradicts and is INCONCLUSIVE, not a pass, if Codex stores no draft. Codex's choice varies: in earlier attempts on this change, other reports got the no-reply menu (Claude itself objected to a risky plan, or declined to repeat a false claim, or the question was about a task Codex never saw), and one run of this report did too. Before this change these three tests stalled at Send on bare acknowledgements, so the earlier results did not show the behaviour they check. Run `20261117-232306` ran this change's test code, committed as `ed78ba6`.
+Tests 7, 8 and 10 expect a draft, so each reports a claim the repository contradicts and is INCONCLUSIVE, not a pass, if Codex stores no draft. Codex's choice varies: in earlier attempts on this change, other reports got the no-reply menu (Claude itself objected to a risky plan, or declined to repeat a false claim, or the question was about a task Codex never saw), and one run of this report did too. Before this change these three tests stalled at Send on bare acknowledgements, so the earlier results did not show the behaviour they check. Run `20261117-232306` ran `f8083f0` plus this change's test code while it was still uncommitted (its `summary.md` says so); the test code was committed unchanged as `ed78ba6`. The rows for 7, 8 and 10 give what the last run showed; each test passes when Codex drafts and the behaviour it checks holds.
 
 Not re-run live: a recipient that stopped waiting before Send, a missing or wrong report number, and the same label in two projects. Unit tests cover them.
