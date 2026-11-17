@@ -129,6 +129,13 @@ class Attribution(unittest.TestCase):
         self.assertEqual(self.tables(attributed), [("events", "new")])
         self.assertEqual(other, [])
 
+    def test_a_link_to_a_conversation_that_is_not_read_only_is_attributed_by_its_session(self):
+        self.db.execute("INSERT INTO events (ts, kind, detail) VALUES (0, 'link:not_read_only', ?)",
+                        (f"{TEST_SID} -> ABC-42 triage",))
+        attributed, other = self.split()
+        self.assertEqual(self.tables(attributed), [("events", "new")])
+        self.assertEqual(other, [])
+
     def test_a_row_with_a_path_under_an_acceptance_root_is_attributed(self):
         self.db.execute("INSERT INTO links (session_id, label, cwd, created) VALUES (?, 'ABC-42 triage',"
                         " '/tmp/relay-accept/repo', 0)", (USER_SID,))

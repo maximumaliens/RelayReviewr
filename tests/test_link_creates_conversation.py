@@ -57,7 +57,8 @@ class LinkCreatesConversation(RelayCase):
         self.link("T-1")
         self.assertEqual(len(self.codex.instructions), 1)
         self.assertTrue(self.codex.instructions[0].startswith("PERSONA-MARKER"))
-        self.assertEqual(self.codex.loaded, ["thread-1"])
+        self.assertEqual([p["threadId"] for p in self.codex.sent("thread/resume")], ["thread-1"],
+                         "confirmed loaded and read-only, as intake.ensure_thread does for the Stop hook")
 
     def test_first_handoff_reuses_the_conversation_and_carries_standing_context(self):
         (self.repo / ".scratch").mkdir()

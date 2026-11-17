@@ -4,6 +4,23 @@ Notable changes to the relay. Releases before this file are described on the Git
 
 ## Unreleased
 
+### Changed
+- The tests workflow's GitHub token is limited to reading the repository (`permissions: contents: read`), closing code-scanning alert 1.
+- Unit tests are kept from a real Codex daemon: the fake Codex stands at the relay's requests, a test without it gets "no Codex daemon" instead of the installed reviewer's socket, and the waiting hook a test starts is given an empty Codex home.
+- `relay install-codex` writes nothing, and says why, if your own lines in the reviewer config would leave a file that isn't valid TOML.
+
+### Fixed
+- **Reviewer conversations could run with write access (#13, critical).** A conversation created by `/relay-link` and opened in a Codex window before its first report, or reloaded after a daemon restart, got Codex's default for a trusted project, workspace-write, and kept it for every turn. Now:
+  - the relay has Codex record read-only when it creates a conversation, and names read-only every time it loads one;
+  - it sets a conversation read-only before each report, when a session links, and when `relay review` opens it, and `relay review` opens the window with `-s read-only`. A conversation with a writable Codex window still open on it is changed too, and the window then shows Read Only;
+  - `relay install-codex` makes read-only the reviewer Codex home's default sandbox. Run it again after updating. A `sandbox_mode` line of your own in that file is commented out, and the command says so;
+  - if Codex doesn't confirm a conversation is read-only, the relay queues nothing into it, marks the report failed with a notification, and `relay review` refuses to open it.
+
+  **Existing conversations become read-only on their next report or the next time `relay review` opens them.** To check one, type `/status` in its Codex window: it shows "Permissions: Read Only".
+
+### Known limitations
+- **You can still choose a write mode yourself (#13).** `/permissions` in a Codex window applies to what you type there. The relay sets the conversation read-only again before the next report.
+
 ## v0.2.0 (2026-11-11)
 
 ### Added

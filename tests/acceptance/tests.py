@@ -3,15 +3,17 @@ import json
 import os
 import pathlib
 import random
+import re
 import signal
 import subprocess
 import time
 
-from harness import (CODEX_HOME, RELAY, REPO, Failed, check, choose, claude_say, claude_start, codex_open, daemon_pid,
-                     drafts, events, feedback_entries, handoffs, human_look, inject_draft, keys, kill_session, latest,
-                     log, menu_options, notifications, pane_pid, pid_alive, q, rollout, screen, session_handoff, sh,
-                     thread_id, thread_turns, tmux, trust_claude_folder, turn_of, type_line, wait_handoff, wait_menu,
-                     wait_until, ask_codex, ask_menu, codex_idle)
+from harness import (CODEX_HOME, RELAY, REPO, Failed, check, choose, claude_say, claude_start, codex_open,
+                     codex_open_by_hand, daemon_pid, drafts, events, feedback_entries, handoffs, human_look,
+                     inject_draft, keys, kill_session, latest, log, menu_options, notifications, pane_pid,
+                     permissions_shown, pid_alive, q, rollout, sandbox_on_plain_resume, screen, session_handoff, sh,
+                     stop_daemon, thread_id, thread_turns, tmux, trust_claude_folder, turn_of, turn_sandboxes,
+                     type_line, wait_handoff, wait_menu, wait_until, ask_codex, ask_menu, codex_idle)
 
 from ccrelay import store  # noqa: E402
 
@@ -1246,12 +1248,273 @@ def t25_session_list_and_note_after_refresh():
             kill_session(name)
 
 
+ASSESSED = ("review_ready", "no_draft")
+
+
+def without_read_only_default():
+    """Put the development Codex home's config back to what `install-codex` wrote before #13: the project
+    trusted and no `sandbox_mode`, so Codex's default for it is workspace-write. The daemon must be stopped, so
+    it starts on this config. The next test's reset writes the current config again."""
+    check(daemon_pid() is None, "the development Codex daemon is stopped, so it starts on the config set here")
+    path = pathlib.Path(CODEX_HOME) / "config.toml"
+    line = 'sandbox_mode = "read-only"\n'
+    check(path.read_text().count(line) == 1, "install-codex wrote one read-only default into the development config")
+    path.write_text(path.read_text().replace(line, ""))
+    check("sandbox_mode" not in path.read_text(), "removed for this test: Codex's default for the trusted project "
+                                                  "is workspace-write again, as before #13")
+
+
+def release_with_esc(name, h):
+    """Release a held session, as the user can, so it has a next ordinary turn."""
+    keys(name, "Escape")
+    wait_until(lambda: not pid_alive(h["hook_pid"]), waiting("the hold released by Esc", 30), "the hold released by Esc")
+    wait_until(lambda: "esc to interrupt" not in screen(name), waiting("Claude idle", 30), "Claude idle")
+
+
+def t26_read_only_from_link_time():
+    """#13: a conversation created by /relay-link and opened with `relay review` before its first report runs its
+    first and later turns read-only. The relay now sets a conversation read-only again whenever a session links or
+    reports; here it does so with the window attached, during a running turn and with a menu open, and the menu
+    must stay in the window and still be answered there."""
+    from ccrelay import codexrpc
+    cfg = store.load_config()
+    label = f"T26-{TAG}"
+    sb = claude_start("cc26b", label, role="builder")
+    tid = thread_id(label)
+    check(tid and not handoffs(label), f"/relay-link created the conversation ({tid}); no report yet")
+    codex_open("cx26", label)
+    log("  waiting 5s: before #13 a window opened here gave the conversation write access within 2s")
+    time.sleep(5)
+    perms = permissions_shown("cx26")
+    check(perms.startswith("Read Only"), f"/status in the window relay review opened, before any report: {perms}")
+    check(sandbox_on_plain_resume(tid) == "readOnly", "Codex reports the conversation read-only with the window open")
+    ev = [f"link-time conversation opened with relay review before its first report: /status shows 'Permissions: {perms}'"]
+
+    claude_say("cc26b", "Reply with just: READY")
+    h1 = session_handoff(sb, HELD)
+
+    def turn():  # "running": Codex is working on the report and has saved no draft, so no menu is open yet
+        if q("SELECT status FROM handoffs WHERE id=?", h1["id"])[0]["status"] != "assessing":
+            return "ended"
+        return "running" if codexrpc.thread_status(cfg, tid) == "active" else None
+    if wait_until(turn, 60, f"H{h1['id']}'s turn running or ended", interval=0.2) == "running":
+        codexrpc.set_read_only(cfg, tid)  # what a second report's hook sends, here while the turn is running
+        ev.append(f"the relay's read-only resume was also sent while H{h1['id']}'s turn was running")
+    else:
+        ev.append(f"INCONCLUSIVE: H{h1['id']}'s turn had ended before a read-only resume could be sent during it")
+    log("  " + ev[-1])
+    h1 = session_handoff(sb, ASSESSED, timeout=300)
+    if h1["status"] == "no_draft":
+        ask_codex("cx26", f"Draft the reply for Claude now and call propose_reply with it for handoff H{h1['id']}.")
+        h1 = session_handoff(sb, "review_ready")
+        ev.append(f"Codex ended H{h1['id']}'s turn without a draft; asked once to draft")
+    wait_menu("cx26")
+    check(f"Answering report H{h1['id']}" in screen("cx26"),
+          f"H{h1['id']}'s menu is shown in the window that was opened before the report")
+
+    sv = claude_start("cc26v", label, role="verifier")  # linking sets the conversation read-only again: menu open
+    claude_say("cc26v", "Reply with just: VERIFIED")
+    h2 = session_handoff(sv, HELD)
+    time.sleep(3)
+    check(q("SELECT status FROM handoffs WHERE id=?", h2["id"])[0]["status"] == "assessing" and h2["thread_id"] == tid,
+          f"the verifier's report H{h2['id']} waits in the same conversation behind the open menu")
+    check(menu_options("cx26") and f"Answering report H{h1['id']}" in screen("cx26"),
+          f"H{h1['id']}'s menu is still open in the window after a second session linked and reported "
+          "(the relay set the conversation read-only again for each)")
+    check(pid_alive(h1["hook_pid"]), "the builder is still held")
+    choose("cx26", "Discuss")
+    h2 = session_handoff(sv, ASSESSED, timeout=300)
+    sandboxes = turn_sandboxes(tid)
+    check(len(sandboxes) >= 2 and set(sandboxes) == {"read-only"},
+          f"every turn ran read-only: turn contexts in the session file {sandboxes}")
+    ev.append(f"the menu for H{h1['id']} stayed in the window and was answered there (Discuss) after the relay's "
+              f"three read-only resumes while it was open (one for the link, two for the report); the queued "
+              f"H{h2['id']} then ran ({h2['status']})")
+    if h2["status"] == "review_ready":
+        wait_menu("cx26")
+        check(f"Answering report H{h2['id']}" in screen("cx26"), f"H{h2['id']}'s menu is shown in the same window")
+    ev.append(f"turn contexts recorded in the session file, first to last: {sandboxes}")
+    return ev
+
+
+def t27_read_only_by_hand_and_after_a_restart():
+    """#13, on the Codex config from before #13 (project trusted, no read-only default), so only what the relay
+    had Codex record at creation keeps the conversation read-only. A conversation created by /relay-link stays
+    read-only when a window is opened by hand with a plain `codex resume <id>`, when it is reloaded after a daemon
+    restart by a resume that names no sandbox, and when the relay reloads it for the first report after a
+    restart; its first and later turns run read-only."""
+    from ccrelay import codexrpc
+    label = f"T27-{TAG}"
+    without_read_only_default()
+    cfg = store.load_config()
+    sid = claude_start("cc27", label)
+    tid = thread_id(label)
+    check(tid and not handoffs(label), f"/relay-link created the conversation ({tid}); no report yet")
+    codex_open_by_hand("cx27", tid)
+    log("  waiting 5s: before #13 a window opened here gave the conversation write access within 2s")
+    time.sleep(5)
+    perms = permissions_shown("cx27")
+    check(perms.startswith("Read Only"), f"/status in a window opened by hand with a plain `codex resume`: {perms}")
+    check(sandbox_on_plain_resume(tid) == "readOnly", "Codex reports the conversation read-only with that window open")
+    ev = [f"opened by hand with a plain `codex resume <id>` before the first report, under a workspace-write "
+          f"default: /status shows 'Permissions: {perms}'"]
+
+    kill_session("cx27")
+    stop_daemon()
+    codexrpc.ensure_daemon(cfg)
+    check(tid not in codexrpc.loaded_threads(cfg), "after a daemon restart the conversation is not loaded")
+    check(sandbox_on_plain_resume(tid) == "readOnly",
+          "reloaded by a resume that names no sandbox (the relay's own reload before #13): still read-only")
+    ev.append("after a daemon restart, a reload that names no sandbox kept it read-only")
+
+    stop_daemon()  # a restart between the link and the first report: the relay starts the daemon and reloads
+    claude_say("cc27", "Reply with just: READY")
+    h1 = session_handoff(sid, ASSESSED, timeout=300)
+    check(turn_sandboxes(tid) == ["read-only"],
+          f"the first report H{h1['id']}, after another daemon restart, ran read-only: {turn_sandboxes(tid)}")
+    codex_open_by_hand("cx27", tid)
+    time.sleep(5)
+    if h1["status"] == "review_ready":
+        wait_menu("cx27")
+        ev.append(f"H{h1['id']}'s menu showed in a window opened by hand afterwards")
+    release_with_esc("cc27", h1)
+    claude_say("cc27", "Reply with just: AGAIN")
+    h2 = session_handoff(sid, ASSESSED, timeout=300, after_id=h1["id"])
+    sandboxes = turn_sandboxes(tid)
+    check(len(sandboxes) >= 2 and set(sandboxes) == {"read-only"},
+          f"the later report H{h2['id']}, with the by-hand window open, ran read-only too: {sandboxes}")
+    ev.append(f"first report after a daemon restart and a later report with a by-hand window open: turn contexts "
+              f"{sandboxes}")
+    return ev
+
+
+def old_style_conversation(cfg, name):
+    """A conversation as the relay created one before #13: started naming read-only, then named. Codex has
+    recorded no settings for it."""
+    from ccrelay import codexrpc, intake
+    result = codexrpc.call(cfg, "thread/start", {"cwd": str(REPO), "sandbox": "read-only",
+                                                "approvalPolicy": codexrpc.approval_param(cfg),
+                                                "developerInstructions": intake.instructions_for(cfg, str(REPO))},
+                           timeout=60)
+    tid = result["thread"]["id"]
+    codexrpc.call(cfg, "thread/name/set", {"threadId": tid, "name": name})
+    return tid
+
+
+def t28_existing_write_conversations_become_read_only():
+    """#13: conversations left with write access by the fault become read-only with no step by the user: at
+    their next report, when a session links to them, and when `relay review` opens them. The Codex config is the
+    one from before #13 throughout, so only the relay's own resume changes them. Six are made the way the fault
+    made them (created the old way, then reloaded after a daemon restart by a resume that names no sandbox).
+    For the reports: one that then ran a turn with write access and is loaded, one that never ran a turn, one
+    that ran a write turn and has a writable window open on it (opened by hand, `/status` showing Workspace)
+    which stays open while the report arrives and must show it (with a window attached, the relay's resume
+    alone leaves write access; its settings update is what changes it), and one that ran a write turn and is
+    not loaded when the report arrives. A real session linked to the ticket reports into each in turn; the harness points
+    the ticket's stored conversation at it, as a session linked before the upgrade would find it. The other two
+    never ran a turn: one is the ticket's conversation when the session links, and one is opened with
+    `relay review`."""
+    from ccrelay import codexrpc
+    label = f"T28-{TAG}"
+    without_read_only_default()
+    cfg = store.load_config()
+    codexrpc.ensure_daemon(cfg)
+    ran_loaded, ran_unloaded, never_ran, at_link, by_review, in_window = (
+        old_style_conversation(cfg, f"{label}-{n}") for n in "abcdef")
+    stop_daemon()
+    codexrpc.ensure_daemon(cfg)
+    for tid in (ran_loaded, ran_unloaded, never_ran, at_link, by_review, in_window):
+        check(sandbox_on_plain_resume(tid) == "workspaceWrite",
+              f"the fault reproduced: {tid[-6:]}, created read-only the old way, has write access after a reload "
+              "that names no sandbox")
+    for tid in (ran_loaded, ran_unloaded, in_window):
+        codexrpc.queue_message(cfg, tid, "Reply with just: OK. Call no tool.", f"t28-{tid[-6:]}")
+    for tid in (ran_loaded, ran_unloaded, in_window):
+        wait_until(lambda: turn_sandboxes(tid) and codexrpc.thread_status(cfg, tid) == "idle", 180,
+                   f"{tid[-6:]} ran a turn")
+        check(turn_sandboxes(tid) == ["workspace-write"], f"{tid[-6:]} ran a turn with write access: {turn_sandboxes(tid)}")
+    check(turn_sandboxes(never_ran) == [], f"{never_ran[-6:]} has run no turn")
+
+    def ticket_conversation(ticket, tid):  # as the relay stored it when it created the conversation
+        q("INSERT INTO threads (project, label, thread_id, cwd, created) VALUES (?, ?, ?, ?, ?)",
+          store.project_of(str(REPO)), ticket, tid, str(REPO), time.time())
+
+    ticket_conversation(label, at_link)
+    sid = claude_start("cc28", label)
+    check(thread_id(label) == at_link, f"/relay-link found the ticket's existing conversation {at_link[-6:]}")
+    check(sandbox_on_plain_resume(at_link) == "readOnly", "linking a session to a write conversation made it read-only")
+    ticket_conversation(f"{label}-r", by_review)
+    codex_open("cx28", f"{label}-r")
+    time.sleep(5)
+    perms = permissions_shown("cx28")
+    check(perms.startswith("Read Only"), f"/status in a write conversation opened with relay review: {perms}")
+    check(sandbox_on_plain_resume(by_review) == "readOnly", "and Codex reports it read-only")
+    kill_session("cx28")
+    last = {"id": 0}
+
+    def next_report(tid, prompt):
+        q("UPDATE threads SET thread_id=? WHERE label=?", tid, label)
+        claude_say("cc28", prompt)
+        h = session_handoff(sid, ASSESSED, timeout=300, after_id=last["id"])
+        check(h["thread_id"] == tid, f"H{h['id']} was reported into {tid[-6:]}")
+        last["id"] = h["id"]
+        return h
+
+    h = next_report(ran_loaded, "Reply with just: ONE")
+    a = turn_sandboxes(ran_loaded)
+    check(a == ["workspace-write", "read-only"], f"loaded, had run a write turn: its next report ran read-only: {a}")
+    release_with_esc("cc28", h)
+    h = next_report(never_ran, "Reply with just: TWO")
+    c = turn_sandboxes(never_ran)
+    check(c == ["read-only"], f"never run, already set to write: its first report ran read-only: {c}")
+    release_with_esc("cc28", h)
+
+    codex_open_by_hand("cx28w", in_window)  # a writable window, left open while the next report arrives
+    time.sleep(5)
+    before = permissions_shown("cx28w")
+    check(before.startswith("Workspace"), f"/status in a window opened by hand on a write conversation: {before}")
+    h = next_report(in_window, "Reply with just: FOUR")
+    w = turn_sandboxes(in_window)
+    check(w == ["workspace-write", "read-only"],
+          f"a writable window open on it, had run a write turn: its next report ran read-only: {w}")
+    shown = wait_until(lambda: re.search(rf"\bH{h['id']}\b", screen("cx28w")), 60,
+                       f"H{h['id']} shown in the window that was left open")
+    check(shown, f"H{h['id']} ran in the same window, which was writable when the report arrived")
+    release_with_esc("cc28", h)
+    wait_until(lambda: menu_options("cx28w") is None and codexrpc.thread_status(cfg, in_window) == "idle", 120,
+               "the window's composer free after the release")
+    after = permissions_shown("cx28w")
+    check(after.startswith("Read Only"), f"/status in that same window after the report: {after}")
+    check(sandbox_on_plain_resume(in_window) == "readOnly", "and Codex reports the conversation read-only")
+    kill_session("cx28w")
+
+    stop_daemon()
+    h = next_report(ran_unloaded, "Reply with just: THREE")
+    b = turn_sandboxes(ran_unloaded)
+    check(b == ["workspace-write", "read-only"], f"not loaded, had run a write turn: its next report ran read-only: {b}")
+    for tid in (ran_loaded, never_ran, at_link, by_review, in_window):
+        check(sandbox_on_plain_resume(tid) == "readOnly",
+              f"{tid[-6:]} is still read-only after that daemon restart, on a reload that names no sandbox")
+    return [f"a loaded conversation that had run a write turn: turn contexts {a}",
+            f"a never-run conversation already set to write: turn contexts {c}",
+            f"a conversation that had run a write turn, not loaded when the report came (daemon restarted): {b}",
+            "each became read-only at its next report with no other step; the Codex config had no read-only default",
+            "a never-run write conversation became read-only when a session linked to its ticket, and another when "
+            f"relay review opened it (/status: 'Permissions: {perms}')",
+            f"a conversation with a writable window left open on it (/status before: 'Permissions: {before}'): its "
+            f"next report ran in that window, read-only: turn contexts {w}; the window's /status afterwards: "
+            f"'Permissions: {after}'",
+            "after a later daemon restart the five still loaded before it were read-only on a reload naming no sandbox"]
+
+
 ALL = [t01_exact_text, t02_correct_session, t03_instruction, t04_no_duplicates, t05_visible_failure,
        t06_esc, t07_open_window_cycle, t08_menu_survival, t09_escalation, t10_loaded_guard, t11_no_draft,
        e1_claude_killed, e2_consecutive_sends, t14_queued_behind_menu, t15_same_ticket, t16_standing_context,
        t17_permission, t18_long_labels, t19_link_creates_conversation, t20_review_once_creates_conversation,
        t21_copied_draft, t22_refresh_existing_conversation, t23_refresh_for_no_reply,
-       t24_review_once_in_a_linked_session, t25_session_list_and_note_after_refresh]
+       t24_review_once_in_a_linked_session, t25_session_list_and_note_after_refresh,
+       t26_read_only_from_link_time, t27_read_only_by_hand_and_after_a_restart,
+       t28_existing_write_conversations_become_read_only]
 # 12 = E1, 13 = E2 (extra checks; design test 12 is the dev-box check). 14-18 are the cross-session checks of #8.
 # 19-20 check #9: the conversation is created by /relay-link and /relay-review.
 # 21-22 check #2: a copied draft of 8 KB or more delivered byte-exact, and what refreshes an existing conversation.
@@ -1259,3 +1522,5 @@ ALL = [t01_exact_text, t02_correct_session, t03_instruction, t04_no_duplicates, 
 # 24 checks #5: /relay-review after /relay-link forwards the earlier reply and leaves the session linked.
 # 25 checks #4: after the documented server refresh, an older conversation's propose_reply takes a note and the menu,
 # the tool result and a new hand-off header list the ticket's sessions.
+# 26-28 check #13: every turn runs read-only. A link-time conversation opened with relay review (26) or by hand, and
+# across daemon restarts (27); conversations the fault left with write access, at their next report (28).

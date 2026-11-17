@@ -17,6 +17,10 @@ class CodexError(Exception):
     pass
 
 
+class NotReadOnly(CodexError):
+    """Codex reports a sandbox other than read-only for a conversation the relay has just set read-only."""
+
+
 def socket_path(cfg):
     return pathlib.Path(cfg["codex_home"]) / "app-server-control" / "app-server-control.sock"
 
@@ -159,6 +163,9 @@ def approval_param(cfg):
 
 
 def start_thread(cfg, cwd, instructions, name):
+    """A new read-only conversation. Codex doesn't record the sandbox a start names, so a later resume that names
+    none (a window opened by hand, a reload after a daemon restart) would apply the Codex home's default. A
+    settings update is recorded, once naming the conversation has given it a session file."""
     result = call(cfg, "thread/start", {
         "cwd": cwd,
         "sandbox": "read-only",
@@ -167,14 +174,48 @@ def start_thread(cfg, cwd, instructions, name):
     }, timeout=60)
     thread_id = result["thread"]["id"]
     call(cfg, "thread/name/set", {"threadId": thread_id, "name": name})
+    update_to_read_only(cfg, thread_id)
     return thread_id
+
+
+def update_to_read_only(cfg, thread_id):
+    """Have Codex apply and record read-only for a loaded conversation that has a session file."""
+    call(cfg, "thread/settings/update", {"threadId": thread_id, "approvalPolicy": approval_param(cfg),
+                                         "sandboxPolicy": {"type": "readOnly", "networkAccess": False}})
+
+
+def resume_read_only(cfg, thread_id):
+    """Resume the conversation naming read-only, which loads it if it isn't loaded, and return the sandbox Codex
+    then reports for it ("readOnly", "workspaceWrite", …; None if it reports none). Every resume the relay sends
+    is this one: a resume that names no sandbox can apply the Codex home's default instead. Its reply is the
+    only place Codex reports a conversation's sandbox."""
+    result = call(cfg, "thread/resume", {"threadId": thread_id, "excludeTurns": True, "sandbox": "read-only",
+                                         "approvalPolicy": approval_param(cfg)}, timeout=60) or {}
+    return (result.get("sandbox") or {}).get("type")
+
+
+def set_read_only(cfg, thread_id):
+    """Set the conversation read-only, loading it if it isn't loaded, and confirm both. The resume is sent to a
+    loaded conversation too, which is how one left with write access becomes read-only. If Codex still reports
+    another sandbox, the relay applies the settings update and asks again; only a conversation that is still
+    not read-only after that is refused (NotReadOnly)."""
+    sandbox = resume_read_only(cfg, thread_id)
+    if sandbox != "readOnly":
+        try:
+            update_to_read_only(cfg, thread_id)
+        except CodexError as e:
+            raise NotReadOnly(f"this conversation is not read-only (Codex reports {sandbox or 'no sandbox'}, and "
+                              f"the settings update failed: {e})") from e
+        sandbox = resume_read_only(cfg, thread_id)
+    if sandbox != "readOnly":
+        raise NotReadOnly(f"this conversation is not read-only (Codex reports {sandbox or 'no sandbox'})")
+    if thread_id not in loaded_threads(cfg):
+        raise CodexError(f"thread {thread_id} is not loaded in the Codex daemon")
 
 
 def ensure_loaded(cfg, thread_id):
     if thread_id not in loaded_threads(cfg):
-        call(cfg, "thread/resume", {"threadId": thread_id, "excludeTurns": True}, timeout=60)
-    if thread_id not in loaded_threads(cfg):
-        raise CodexError(f"thread {thread_id} is not loaded in the Codex daemon")
+        set_read_only(cfg, thread_id)
 
 
 def queue_message(cfg, thread_id, text, client_id):

@@ -2,10 +2,12 @@
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
 import time
+import tomllib
 
 from . import claude_hooks, codexrpc, intake, mcp_server, store
 
@@ -104,6 +106,12 @@ def review_once(db, sid, cwd, label, role):
                             f"Forwarding the previous reply for '{label}'{sent_as} when this turn ends", also=stays)
 
 
+# What the user is told when Codex doesn't confirm a conversation is read-only; %s is codexrpc.NotReadOnly's text.
+NOT_READ_ONLY = ("%s. The relay sends it no reports and won't open it. Update the reviewer Codex, run relay "
+                 "install-codex again and retry; if it is still refused, use a new ticket label (README, "
+                 "Troubleshooting).")
+
+
 def reply_with_conversation(db, sid, label, cwd, done, also="", then=""):
     """Create the ticket's conversation now (empty: nothing is queued), so it can be opened straight away, and
     print the command's one-line reply. Its first sentence holds the clauses `done`, how to open the conversation
@@ -113,6 +121,9 @@ def reply_with_conversation(db, sid, label, cwd, done, also="", then=""):
         print(" ".join(filter(None, ("; ".join(filter(None, clauses)) + ".", then, last))))
     try:
         intake.ensure_thread(db, store.load_config(), label, cwd)
+    except codexrpc.NotReadOnly as e:
+        store.event(db, "link:not_read_only", f"{sid} -> {label}")
+        return reply(done, also, last=f"Its Codex conversation exists, but {NOT_READ_ONLY % e}")
     except (OSError, subprocess.SubprocessError, codexrpc.CodexError, KeyError, ValueError) as e:
         # also a malformed config or an unexpected Codex reply: the user gets the plain line, not a traceback
         store.event(db, "link:no_conversation", f"{sid} -> {label}")  # the reason is in the reply
@@ -159,9 +170,21 @@ def review(args):
                  + "\n".join(f"  {r['project']}" for r in rows))
     row = rows[0]
     codexrpc.ensure_daemon(cfg)
-    codexrpc.ensure_loaded(cfg, row["thread_id"])
+    try:
+        codexrpc.set_read_only(cfg, row["thread_id"])
+    except codexrpc.NotReadOnly as e:
+        sys.exit(f"relay: {NOT_READ_ONLY % e}")
     os.chdir(row["cwd"])
-    os.execvpe(cfg["codex_bin"], [cfg["codex_bin"], "resume", row["thread_id"]], codexrpc.codex_env(cfg))
+    os.execvpe(cfg["codex_bin"], [cfg["codex_bin"], "resume", *window_flags(cfg), row["thread_id"]],
+               codexrpc.codex_env(cfg))
+
+
+def window_flags(cfg):
+    """The flags `relay review` opens the Codex window with: read-only, and the configured approval policy where
+    the Codex command line can express it (a granular policy has no flag; the relay has already set it on the
+    conversation). Never -c or --profile: either one disconnects the window from the shared daemon (DESIGN.md)."""
+    policy = cfg["approval_policy"]
+    return ["-s", "read-only"] + (["-a", policy] if policy in ("on-request", "never") else [])
 
 
 def status():
@@ -322,9 +345,12 @@ def install_codex():
             skip = False
         elif not skip:
             lines.append(line)
+    lines, set_aside = without_own_sandbox_mode(lines)
     user = "\n".join(lines).strip()
     py = system_python()
-    top = f"{begin} top-level ---\nthread_unload_delay_secs = 31536000\n{finish}\n"
+    # Read-only is the home's default sandbox: a resume that names none applies the default to a conversation
+    # with no recorded settings, and a trusted project's default would otherwise be workspace-write.
+    top = f"{begin} top-level ---\nthread_unload_delay_secs = 31536000\nsandbox_mode = \"read-only\"\n{finish}\n"
     tables = (f"{begin} tables ---\n"
               f"[mcp_servers.relay]\ncommand = \"{py}\"\nargs = [\"{RELAY}\", \"mcp\"]\n"
               f"env = {{ RELAY_HOME = \"{store.relay_home()}\" }}\nstartup_timeout_sec = 60\n\n"
@@ -336,9 +362,40 @@ def install_codex():
     tables += f"{finish}\n"
     # TOML: top-level keys must precede every table, so the managed key goes first and the
     # managed tables last, with the user's own settings in between.
-    path.write_text(top + (user + "\n" if user else "") + tables)
+    text = top + (user + "\n" if user else "") + tables
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:  # Codex wouldn't start on it; the lines outside the relay's blocks are the user's
+        sys.exit(f"relay: not writing {path}: with your own lines the result would not be valid TOML ({e}). "
+                 "Correct them, then run install-codex again. The file is unchanged.")
+    path.write_text(text)
     os.chmod(path, 0o600)
-    print(f"Wrote reviewer Codex config {path}")
+    print(f"Wrote reviewer Codex config {path}. Its default sandbox is read-only (sandbox_mode = \"read-only\").")
+    for line in set_aside:
+        print(f"Your own line `{line}` was commented out: a second sandbox_mode would make the file invalid, and "
+              "the reviewer is read-only.")
+
+
+def without_own_sandbox_mode(lines):
+    """The user's own config lines with any top-level `sandbox_mode` (one before the first table) commented out,
+    and the lines that were. The relay's block sets that key, and TOML allows a key only once. Which line sets
+    the top-level key is decided by parsing, not by looking for table headers: a line of a multi-line array
+    starts with a bracket too. If the user's lines don't parse, nothing is changed here, and install_codex
+    refuses to write the result."""
+    def sets_default(candidate):
+        try:
+            return "sandbox_mode" in tomllib.loads("\n".join(candidate))
+        except tomllib.TOMLDecodeError:
+            return None
+    if not sets_default(lines):
+        return lines, []
+    for i, line in enumerate(lines):
+        if re.match(r"""\s*["']?sandbox_mode["']?\s*=""", line):
+            comment = f"# {line.strip()}  (commented out by relay install-codex: the reviewer is read-only)"
+            without = lines[:i] + [comment] + lines[i + 1:]
+            if sets_default(without) is False:
+                return without, [line.strip()]
+    return lines, []
 
 
 def main(argv=None):

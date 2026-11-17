@@ -51,7 +51,7 @@ The relay uses no API keys. Claude and Codex run on whatever sign-in they alread
    ```
    Start your persona file from a copy of `persona/example.md`. Use the project's main folder; its worktrees are found from it. Use `""` as the persona to review a project without one.
 3. **Sign in the reviewer Codex** (only you can do this): `CODEX_HOME=~/.codex-reviewer codex login`. This is a separate Codex home: your normal `~/.codex` isn't touched. To choose the reviewer's model and reasoning effort, set `model` and `model_reasoning_effort` in `~/.codex-reviewer/config.toml`.
-4. **Set up the reviewer Codex:** `relay install-codex`. It adds the relay's tool server, keeps conversations loaded so opening one never starts a review by itself, and marks your listed projects as trusted. Your own settings in that file are kept. Run it again after changing the project list.
+4. **Set up the reviewer Codex:** `relay install-codex`. It adds the relay's tool server, keeps conversations loaded so opening one never starts a review by itself, makes read-only the default sandbox, and marks your listed projects as trusted. Your own settings in that file are kept, with one exception: a `sandbox_mode` line of your own is commented out, and the command tells you. Run it again after changing the project list, and after updating the relay.
 5. **Set up Claude:** `relay install-claude`. It adds the relay's Stop and SessionEnd hooks to `~/.claude/settings.json` (with a 4-hour wait limit), raises Claude Code's limit on repeated Stop-hook replies so a long review loop isn't cut off, and adds the `/relay-link`, `/relay-unlink` and `/relay-review` commands. It backs up `settings.json` first (`settings.json.relay-backup-<date-time>`). It refuses, changing nothing, if a `relay-*.md` command file it didn't write already exists.
 6. **Start new Claude sessions** after installing. A session that was already open may not have loaded the hooks.
 
@@ -160,8 +160,13 @@ Claude Code shows a delivered draft as **"Stop hook error: …"**. That's Claude
 - A conversation keeps the persona it was created with. Changing a persona file affects new conversations only; for an existing ticket, use a new label to start fresh.
 - The relay also gives Codex its own operating instructions (draft a complete instruction or have the relay copy a stored report, keep each delivered instruction standalone because sessions are isolated, call the menu, stay read-only, never claim you answered a prompt). They're kept separate from your persona.
 - Codex reviews read-only: it can read your project but can't change it.
+  - **To check,** type `/status` in the conversation's Codex window. It shows "Permissions: Read Only".
+  - The relay sets a conversation read-only when it creates it, each time a session links to it, before each report it sends there, and when `relay review` opens it. If Codex doesn't confirm the conversation is read-only, the relay sends it nothing and won't open it (see *Troubleshooting*).
+  - If you choose another mode yourself with `/permissions` in the window, it applies to what you type there until the next report, when the relay sets read-only again.
 
 ### After you update the relay: what an existing conversation picks up
+
+**Read-only.** Versions up to v0.2.0 could leave a conversation with write access: `/status` showed "Permissions: Workspace". After updating, run `relay install-codex` again, which makes read-only the reviewer's default. An existing conversation becomes read-only at its next report or the next time you open it with `relay review`; you don't need to do anything to it, and a Codex window you left open on it changes to Read Only with that report. Until one of those happens, don't type requests into a conversation whose `/status` doesn't show Read Only.
 
 A new version adds a tool (`no_reply_menu`) and revises tool descriptions, which live in the tool server. Reopening the conversation in a Codex window (`relay review <ticket>`, then wait about 15 s for it to attach) or restarting the Codex daemon replaced the tool server in testing; in acceptance test 23 an existing conversation then listed the new tool, real Codex called it when asked, and a Discuss choice returned the revised guidance (one run, one Codex version; see DESIGN.md). Whether Codex chooses it unprompted wasn't tested. The guidance in the operating instructions about the no-reply path and Discuss keeping Claude held reaches only conversations created after the update; the short line in each report's header carries the no-reply hint to older ones. Update the relay when no session is held. The procedure doesn't refresh creation-time operating instructions.
 
@@ -196,6 +201,8 @@ The relay notifies you when a review is ready, when a report is queued behind an
 | "Claude hook incompatible" | Claude Code changed what it gives the Stop hook, and nothing was sent. Check for a relay update. |
 | `relay review` says no conversation, or lists several projects | Check the label's spelling, or run it from inside the project's folder. |
 | Codex asks permission to run a command | Decline it. Codex reviews read-only and is told never to ask. |
+| "Assessment failed: this conversation is not read-only", or `relay review` or `/relay-link` says the conversation is not read-only | Codex didn't confirm the conversation is read-only when the relay asked, so the relay sent it nothing and Claude was released. Check that the reviewer Codex is up to date and run `relay install-codex` again, then retry. If it still refuses, link the session to a new ticket label, which starts a new conversation. |
+| `/status` in a Codex window shows "Permissions: Workspace", not "Read Only" | The conversation has write access (see *After you update the relay*). Its next report sets it read-only, also with the window open. To change it now, close the window and open it with `relay review "<label>"`, which sets it read-only first. |
 | Anything else | Collect the output of `relay status` and what both terminals show. |
 
 ## Files and commands
