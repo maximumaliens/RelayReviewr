@@ -39,11 +39,72 @@ class StartThreadTest(unittest.TestCase):
                  "cwd": "/tmp/repo", "model": "gpt-6.1-sol", "modelProvider": "openai",
                  "sandbox": {"type": "readOnly", "networkAccess": False}}
         cfg = {"approval_policy": "on-request"}
-        with mock.patch.object(codexrpc, "call", side_effect=[reply, {}]) as call:
+        with mock.patch.object(codexrpc, "call", side_effect=[reply, {}, {}]) as call:
             thread_id = codexrpc.start_thread(cfg, "/tmp/repo", "instructions", "ABC-42")
         self.assertEqual(thread_id, THREAD_ID)
-        self.assertEqual([c.args[1] for c in call.call_args_list], ["thread/start", "thread/name/set"])
+        self.assertEqual([c.args[1] for c in call.call_args_list],
+                         ["thread/start", "thread/name/set", "thread/settings/update"])
         self.assertEqual(call.call_args_list[1].args[2], {"threadId": THREAD_ID, "name": "ABC-42"})
+
+    def test_has_codex_record_read_only_in_the_shape_a_settings_update_takes(self):
+        # ThreadSettingsUpdateParams: sandboxPolicy is a SandboxPolicy object (tagged by "type"), not the
+        # SandboxMode string that thread/start and thread/resume take; ThreadSettingsUpdateResponse is empty
+        reply = {"thread": thread({"type": "idle"}), "sandbox": {"type": "readOnly", "networkAccess": False}}
+        with mock.patch.object(codexrpc, "call", side_effect=[reply, {}, {}]) as call:
+            codexrpc.start_thread({"approval_policy": "on-request"}, "/tmp/repo", "instructions", "ABC-42")
+        self.assertEqual(call.call_args_list[0].args[2]["sandbox"], "read-only")
+        self.assertEqual(call.call_args_list[2].args[2],
+                         {"threadId": THREAD_ID, "approvalPolicy": "on-request",
+                          "sandboxPolicy": {"type": "readOnly", "networkAccess": False}})
+
+
+class SetReadOnlyTest(unittest.TestCase):
+    """ThreadResumeParams takes `sandbox` as a SandboxMode string; ThreadResumeResponse reports it as a
+    SandboxPolicy object tagged by "type". The replies are the development daemon's, as #13's probes saw them."""
+    CFG = {"approval_policy": "on-request"}
+
+    def resume_reply(self, sandbox, profile=None):
+        return {"thread": thread({"type": "idle"}), "approvalPolicy": "on-request", "approvalsReviewer": "user",
+                "cwd": "/tmp/repo", "model": "gpt-6.1-sol", "modelProvider": "openai", "sandbox": sandbox,
+                "activePermissionProfile": profile}
+
+    def test_resumes_naming_read_only_and_confirms_the_thread_is_loaded(self):
+        replies = [self.resume_reply({"type": "readOnly", "networkAccess": False}), {"data": [THREAD_ID]}]
+        with mock.patch.object(codexrpc, "call", side_effect=replies) as call:
+            codexrpc.set_read_only(self.CFG, THREAD_ID)
+        self.assertEqual(call.call_args_list[0].args[1:],
+                         ("thread/resume", {"threadId": THREAD_ID, "excludeTurns": True, "sandbox": "read-only",
+                                            "approvalPolicy": "on-request"}))
+        self.assertEqual(call.call_args_list[1].args[1], "thread/loaded/list")
+
+    def test_a_workspace_write_reply_is_refused(self):
+        reply = self.resume_reply({"type": "workspaceWrite", "writableRoots": [], "networkAccess": False,
+                                   "excludeTmpdirEnvVar": False, "excludeSlashTmp": False},
+                                  {"id": ":workspace", "extends": None})
+        with mock.patch.object(codexrpc, "call", side_effect=[reply]):
+            with self.assertRaises(codexrpc.NotReadOnly) as refused:
+                codexrpc.set_read_only(self.CFG, THREAD_ID)
+        self.assertEqual(str(refused.exception), "this conversation is not read-only (Codex reports workspaceWrite)")
+
+    def test_a_reply_that_reports_no_sandbox_is_refused(self):
+        with mock.patch.object(codexrpc, "call", side_effect=[{"thread": thread({"type": "idle"})}]):
+            with self.assertRaises(codexrpc.NotReadOnly):
+                codexrpc.set_read_only(self.CFG, THREAD_ID)
+
+    def test_a_thread_still_not_loaded_is_an_error(self):
+        replies = [self.resume_reply({"type": "readOnly", "networkAccess": False}), {"data": []}]
+        with mock.patch.object(codexrpc, "call", side_effect=replies):
+            with self.assertRaises(codexrpc.CodexError):
+                codexrpc.set_read_only(self.CFG, THREAD_ID)
+
+    def test_ensure_loaded_resumes_read_only_only_a_thread_that_is_not_loaded(self):
+        with mock.patch.object(codexrpc, "call", side_effect=[{"data": [THREAD_ID]}]) as call:
+            codexrpc.ensure_loaded(self.CFG, THREAD_ID)
+        self.assertEqual([c.args[1] for c in call.call_args_list], ["thread/loaded/list"])
+        replies = [{"data": []}, self.resume_reply({"type": "readOnly", "networkAccess": False}), {"data": [THREAD_ID]}]
+        with mock.patch.object(codexrpc, "call", side_effect=replies) as call:
+            codexrpc.ensure_loaded(self.CFG, THREAD_ID)
+        self.assertEqual(call.call_args_list[1].args[2]["sandbox"], "read-only")
 
 
 class QueuedIdsTest(unittest.TestCase):

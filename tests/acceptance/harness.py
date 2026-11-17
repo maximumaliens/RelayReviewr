@@ -270,6 +270,22 @@ def codex_open(name, label):
     wait_until(lambda: "OpenAI Codex" in screen(name) or "›" in screen(name), 60, f"{name} Codex window")
 
 
+def codex_open_by_hand(name, tid):
+    """A Codex window opened without the relay, as the user can: a plain `codex resume <id>`, with no sandbox or
+    approval flag."""
+    tmux_start(name, f"codex resume {tid}")
+    wait_until(lambda: "OpenAI Codex" in screen(name) or "›" in screen(name), 60, f"{name} Codex window")
+
+
+def permissions_shown(name):
+    """What Codex's `/status`, typed in a window whose composer is free, shows for Permissions."""
+    seen = screen(name).count("Permissions:")
+    type_line(name, "/status")
+    wait_until(lambda: screen(name).count("Permissions:") > seen, 30, f"{name} /status")
+    line = [ln for ln in screen(name).splitlines() if ln.strip().startswith("Permissions:")][-1]
+    return " ".join(line.split()[1:])
+
+
 def menu_options(name):
     s = screen(name)
     if "enter to submit" not in s or "Choice" not in s:
@@ -368,6 +384,30 @@ def rollout(tid):
     """The development Codex home's recorded session file for thread `tid` (it holds the thread's instructions)."""
     paths = sorted(pathlib.Path(CODEX_HOME, "sessions").glob(f"**/*{tid}*.jsonl"))
     return "".join(p.read_text() for p in paths)
+
+
+def turn_sandboxes(tid):
+    """The sandbox each turn of the conversation ran under, oldest first, from the turn contexts Codex recorded
+    in its session file ("read-only", "workspace-write", …)."""
+    out = []
+    for line in rollout(tid).splitlines():
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("type") == "turn_context":
+            out.append(((entry.get("payload") or {}).get("sandbox_policy") or {}).get("type"))
+    return out
+
+
+def sandbox_on_plain_resume(tid):
+    """The sandbox Codex reports for the conversation after a resume that names none ("readOnly",
+    "workspaceWrite", …). That is the request a window opened by hand makes, and the one the relay's own reload
+    made before #13. On a loaded conversation it changes nothing; it loads one that isn't, with what Codex
+    recorded for it, else the Codex home's default."""
+    from ccrelay import codexrpc
+    result = codexrpc.call(store.load_config(), "thread/resume", {"threadId": tid, "excludeTurns": True}, timeout=60)
+    return result["sandbox"]["type"]
 
 
 CONTINUE = setup.TMP / "continue"

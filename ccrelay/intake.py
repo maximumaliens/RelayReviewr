@@ -29,8 +29,8 @@ def instructions_for(cfg, cwd):
 
 def ensure_thread(db, cfg, label, cwd):
     """Return the thread id for `label` in the project holding `cwd`, creating it on first use. The thread is
-    loaded on return. Two sessions handing off at once for the same project and label share one thread: the
-    check and the creation run under a lock for that conversation, so the second finds the first's."""
+    loaded and read-only on return. Two sessions handing off at once for the same project and label share one
+    thread: the check and the creation run under a lock for that conversation, so the second finds the first's."""
     codexrpc.ensure_daemon(cfg)
     project = store.project_of(cwd)
     with conversation_lock(project, label):
@@ -42,7 +42,7 @@ def ensure_thread(db, cfg, label, cwd):
             db.execute("INSERT INTO threads (project, label, thread_id, cwd, created) VALUES (?, ?, ?, ?, ?)",
                        (project, label, thread_id, cwd, store.now()))
             store.event(db, "thread:created", f"{project} {label} -> {thread_id}")
-    codexrpc.ensure_loaded(cfg, thread_id)
+    codexrpc.set_read_only(cfg, thread_id)
     return thread_id
 
 
@@ -58,7 +58,10 @@ def conversation_lock(project, label):
 
 
 def queue(db, cfg, thread_id, text, client_id):
-    """Queue `text` and confirm the thread is still loaded, so opening the window can never be what runs it."""
+    """Set the thread read-only, queue `text`, and confirm the thread is still loaded. Nothing is queued into a
+    conversation Codex doesn't confirm is read-only (codexrpc.NotReadOnly), so no turn the relay starts runs with
+    write access; and a loaded thread means opening the window can never be what runs the queued text."""
+    codexrpc.set_read_only(cfg, thread_id)
     item_id = codexrpc.queue_message(cfg, thread_id, text, client_id)
     codexrpc.ensure_loaded(cfg, thread_id)
     return item_id

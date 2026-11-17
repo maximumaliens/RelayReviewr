@@ -24,7 +24,7 @@ The code lives in its checkout (e.g. `~/tools/cc-codex-relay/`) and its state un
 
 ### Claude side (user-level `~/.claude`)
 - `/relay-link <label>` records session ID → ticket label. With no argument it suggests the git branch name. `/relay-unlink` stops forwarding. `/relay-review [label]` forwards one turn from any session, linked or not; that session then waits like a linked one (which reply, and what happens to an existing link: *One-off review*, #5). The names are prefixed so they can't clash with existing commands or skills: Claude Code already has a `review` skill.
-- **Conversation at link time** (#9, 2026-11-01). `/relay-link` and `/relay-review` create the ticket's conversation for the session's project and label while the command runs (`intake.ensure_thread`: same daemon start, the per-conversation lock, persona and thread-loaded guard as the Stop hook), so `relay review` works at once. Nothing is queued, so opening it triggers no assessment, and standing context still rides on the first hand-off. If Codex can't be reached the link is still recorded, the reply says so, and the first forwarded turn's Stop hook creates the conversation as before. Upgrade-safe: a hook started on older code finds the conversation created at link time through the same lookup, and link time writes nothing it polls (standing context is recorded only when a hand-off is queued).
+- **Conversation at link time** (#9, 2026-11-01). `/relay-link` and `/relay-review` create the ticket's conversation for the session's project and label while the command runs (`intake.ensure_thread`: same daemon start, the per-conversation lock, persona and thread-loaded guard as the Stop hook), so `relay review` works at once. Nothing is queued, so opening it triggers no assessment, and standing context still rides on the first hand-off. If Codex can't be reached the link is still recorded, the reply says so, and the first forwarded turn's Stop hook creates the conversation as before. Upgrade-safe: a hook started on older code finds the conversation created at link time through the same lookup, and link time writes nothing it polls (standing context is recorded only when a hand-off is queued). *Corrected by #13:* a conversation created this way has run no turn, and Codex had recorded no settings for it, so the first resume that named no sandbox gave it write access. The relay now has Codex record read-only at creation (*Read-only reviewer*).
 - **Install safety:** `install-claude` backs up `settings.json` (timestamped) before each change. It refuses, changing nothing, if a `relay-*.md` command file without the relay's marker already exists. It removes only its own hook entries, matched exactly. `uninstall-claude` removes only what it added and restores the stop-hook cap to its previous value. It leaves a cap value the user changed after install, and every other setting, as they are.
 - **Stop hook** (`timeout: 14400`, i.e. 4 h):
   - It ignores sessions that aren't linked. Subagent turns (SubagentStop) are never forwarded, nor are turns still waiting on background tasks.
@@ -48,6 +48,7 @@ The code lives in its checkout (e.g. `~/tools/cc-codex-relay/`) and its state un
   - The relay raises that delay in the reviewer home's config.
   - After each queue it confirms the daemon is up and the thread is loaded, using `thread/loaded/list` and `thread/resume` over the daemon control socket.
   - If it can't confirm that, it marks the handoff failed and notifies the user. It never leaves a pending item that opening the thread would fire.
+  - Before each queue it sets the thread read-only and checks Codex's answer. It queues nothing into a thread Codex doesn't confirm is read-only (#13, *Read-only reviewer*).
 - `codex queue` exits 0 even when the daemon is stopped [spike]. So the relay records the printed queue-item ID and checks the queue table before any re-queue.
 - **Menu MCP server** (stdio, spawned by the Codex daemon):
   - Codex calls it with its draft. The relay stores the draft and shows a form elicitation with a single-select of the four choices.
@@ -58,8 +59,8 @@ The code lives in its checkout (e.g. `~/tools/cc-codex-relay/`) and its state un
 
 ### Codex side (dedicated reviewer `CODEX_HOME`, e.g. `~/.codex-reviewer`)
 - It has its own `codex login` and its own daemon, so hooks in the user's own `~/.codex` don't fire here (Q28).
-- `relay review <label>` opens `CODEX_HOME=… codex resume <thread-id>`. It must not pass `--profile` or `-c` overrides, because either one disconnects the window from the shared daemon and queued turns would no longer show in it [source/spike]. `-s` / `-a` are fine [spike].
-- Threads are created explicitly with `-s read-only -a on-request`, and these settings stick to the thread.
+- `relay review <label>` opens `CODEX_HOME=… codex resume -s read-only -a on-request <thread-id>` (#13). It must not pass `--profile` or `-c` overrides, because either one disconnects the window from the shared daemon and queued turns would no longer show in it [source/spike]. `-s` / `-a` are fine [spike; tested 2026-11-17: `/status` in that window shows "Server: Local background server", and queued reports show in it].
+- Threads are created read-only with approval policy `on-request`. ~~These settings stick to the thread.~~ *Corrected by #13:* Codex doesn't record the sandbox sent with `thread/start`. Settings stick only once a turn, a resume or a settings update has applied them, so the relay has Codex record read-only at creation and names read-only on every resume (*Read-only reviewer*).
   - `-a never` would silently decline every menu [spike].
   - Read-only writes fail without asking [tested].
   - Under `on-request`, Codex *can* ask to escalate a command. The persona says never to escalate, and the user declines any request that appears. Whether a granular approval policy removes this is [unverified].
@@ -310,6 +311,61 @@ Scope: the session list given to Codex, every linked session in the menu with it
 **Deferred: following a continued session.** When Claude Code continues a conversation under a new session ID (for example after `/bg`), the link stays on the old ID and the new session isn't reviewed. Automatic following is deferred. Claude Code starts the new session with a SessionStart hook whose `source` is `fork`, and the documented input names no previous session; the same `source` also covers `/branch`, `/fork` and `--fork-session`, where the original session carries on, so moving the link would be wrong there [source: Claude Code hooks documentation, read 2026-11-10; not run].
 - *Workaround:* run `/relay-link <label> --as <role>` again in the continued session.
 - *Known limitation:* the old ID's link stays until that session ends or is unlinked, so the old ID can still be listed as a linked session.
+
+## Read-only reviewer (#13, 2026-11-17)
+
+Problem: the README promises that Codex reviews read-only. Some reviewer conversations ran with `workspace-write` and approval policy `on-request` from their first turn, so commands that write inside the project ran without asking. In one, a reviewer's own script wrote test rows into a project's real development database.
+
+### Cause
+
+Everything here was run in the isolated development environment (Codex CLI 0.166.0, app-server daemon 0.169.0), at triage and again in the build's probes.
+
+- **What sticks.** Codex keeps the last settings applied to a conversation, in its session file (`thread_settings_applied`, and each turn's `turn_context`). A turn, a resume or a settings update applies settings. [tested]
+- **What doesn't.** The `sandbox: "read-only"` sent with `thread/start` applies to the loaded conversation but is never recorded. A new conversation has no session file at all until it is named (`thread/name/set`); until then `thread/resume` fails with "no rollout found". [tested]
+- **What fills the gap.** A resume that names no sandbox, on a conversation with nothing recorded, applies the Codex home's default. Two such resumes existed: `codex resume <id>` in a window, which is what `relay review` ran, and the relay's own `thread/resume` after a daemon restart. [tested]
+- **Why the default was write.** `relay install-codex` marked each persona project `trust_level = "trusted"` and set no `sandbox_mode`, and Codex defaults a trusted folder to workspace-write. [tested]
+- **After that, it holds.** Once settings are recorded, a later resume that names no sandbox keeps them, write or read-only, whatever the config default. [tested]
+- **Why it started with #9.** *Conversation at link time* creates conversations that have no turn until their first report, and `relay review` is the next step the relay suggests. Before #9, the first report's turn ran at creation and recorded read-only.
+- **What records read-only** (build probes) [tested]:
+  - `thread/settings/update` with a read-only `sandboxPolicy` is recorded, also when the conversation is already read-only, once the session file exists.
+  - `thread/resume` naming read-only is recorded when it loads the conversation or changes what is live. On a loaded conversation that is already read-only it records nothing: a conversation started, named and resumed read-only still came back workspace-write from a plain resume after a daemon restart.
+- **Detection.** `thread/read` doesn't report a conversation's sandbox. The `thread/resume` reply does (`sandbox`, a policy object tagged `readOnly`, `workspaceWrite`, …). [tested]
+
+### Rulings and build
+
+- **Recorded at creation.** `codexrpc.start_thread` starts the conversation read-only, names it, then sends `thread/settings/update` with the read-only policy and the configured approval policy. The order matters: naming is what creates the session file. A window opened by hand and a reload after a daemon restart then keep read-only under a write default. [tested: acceptance test 27; with that one call removed, the same test failed with "Permissions: Workspace"]
+- **Every resume names read-only.** `codexrpc.set_read_only` sends `thread/resume` with `sandbox: "read-only"` and the configured approval policy, to a loaded conversation too, and confirms the conversation is loaded. It is the only resume the relay sends. It runs:
+  - when a session links or asks for a one-off review (`intake.ensure_thread`);
+  - before anything is queued (`intake.queue`: every report, and the session-ended notice);
+  - in `relay review`, before the window opens.
+
+  This is how a conversation left with write access becomes read-only. [tested: unit; acceptance test 28] A report therefore sends two such resumes, one from each of the first two; that keeps each function's promise its own.
+- **Fail closed.** If the resume's reply reports a sandbox other than `readOnly`, or none, `set_read_only` raises `NotReadOnly`:
+  - a report isn't queued; its hand-off is `failed` with "could not start the Codex assessment: this conversation is not read-only (Codex reports …)", the user is notified and Claude is released, as for the thread-loaded guard;
+  - the session-ended notice isn't queued, and the notification says Codex could not be told;
+  - `/relay-link` and `/relay-review` say the conversation exists but isn't read-only, and give no `relay review` hint;
+  - `relay review` refuses to open it and says why.
+
+  [tested: unit, with the fake Codex answering workspace-write. Not seen live: the development daemon always honoured the request.]
+  - *Departure from the issue:* it asked for a warning in the notification and the menu. A turn never runs in a conversation the relay hasn't just confirmed, so there is no menu to warn in; the refusal and the notification replace it.
+- **The window.** `relay review` runs `codex resume -s read-only`, plus `-a` with the configured approval policy when it is `on-request` or `never`, the values the Codex command line lists. A granular policy has no flag; the relay's resume has already set it. Never `-c` or `--profile`. [tested: unit; acceptance test 26]
+- **Read-only default.** `relay install-codex` writes `sandbox_mode = "read-only"` in its managed top-level block, so a conversation with nothing recorded gets read-only from a resume that names no sandbox. A top-level `sandbox_mode` line of the user's own would make the file invalid TOML (a key may appear once), so it is commented out and the command says so. Which line that is, is found by parsing the user's lines, not by looking for table headers. One inside a table of the user's is left alone. If the result would not parse, because the user's own lines don't, nothing is written and the command says why. [tested: unit, parsed with `tomllib`] At triage the default was seen to work after a daemon restart; whether a running daemon picks it up without one is [unverified].
+- **Nothing is disturbed by the relay's resume** (the brief asked for this before setting read-only every time). The relay's connection resumes and closes at once. With the window attached, with a turn running, and with a menu open: the turn completed, the menu stayed in the window and was answered there, and the report queued behind it ran afterwards. [tested: acceptance test 26, where one resume arrives during the first turn and three while its menu is open (a second session's link, then its report); tests 14 (a report queued behind an open menu) and 19 (link-time creation) rerun and pass] So read-only is set every time, with no "only when safe" exception.
+  - *Not shown either way:* tests 7, 8 and 10 were rerun too and stop before their own checks, at a step that expects a Send option. They stop at the same step on the commit before this change: Codex now answers their acknowledgement-only report ("READY") with the no-reply menu (#3), which has no Send. In test 8, on both commits, the menu was not shown again within 60 s of reopening after the daemon was killed. Those tests need a report that calls for an instruction; that is separate from #13.
+- **Existing conversations** become read-only at their next report, link or `relay review`, with no step by the user. Afterwards a reload that names no sandbox keeps read-only. [tested: acceptance test 28, on a Codex config with no read-only default. At a report: one that ran a turn with write access, loaded and not loaded, and one that never ran but was already set to write. At a link and at `relay review`: a never-run one each.]
+- **Upgrading while sessions are held.** Nothing a held session's hook polls or writes changes. A report an older hook already queued runs under whatever its conversation had; the next report, filed by a new hook process, sets read-only first. The menu server sends no resume. [source]
+- **Unit seam.** The fake Codex now stands at `codexrpc.call`, so the relay's own client code runs in every test that uses it. It records each request with its parameters and keeps a live and a recorded sandbox per conversation, following the probes above. `RelayCase` also keeps its tests from a real daemon, because the default Codex home is the installed reviewer's: in the test's own process the relay's requests fail as an absent daemon's do unless the fake is installed, and the waiting hook a test starts as a child process is given an empty Codex home.
+
+### Limits
+
+- **A conversation from before the fix that has never run a turn and is still loaded** has nothing recorded, and the relay's read-only resume records nothing for it while it stays loaded and read-only. Its first report records read-only (every turn does). If the daemon restarts first and the user opens it by hand, the config default decides: read-only once `install-codex` has been run again. [source: follows from the probes; not run as its own case]
+- **The check after queueing.** `intake.queue` confirms the conversation is still loaded after it queues. If it was unloaded in those milliseconds (a daemon restart), the reload names read-only; if Codex then didn't confirm it, the hand-off fails with the item already queued. [source; not run]
+- **A failed creation leaves a conversation behind.** If Codex rejects the settings update (a Codex without that request), creation fails and the relay stores no conversation, as when naming fails; the started conversation stays unused in the Codex home, one for each attempt. [source; not run]
+- **`relay review` after a daemon restart** was not run live as its own case. The restart cases in test 27 use a window opened by hand, which names no sandbox; `relay review` names read-only twice, in its own resume and in the window's flags.
+- **The user can still choose a write mode in the window** (`/permissions`). The relay sets read-only again before the next report, but a turn the user starts by typing before then runs with what they chose. Out of scope.
+- **`/permissions` → Read Only as a by-hand fix** was not tested, so the README doesn't offer it. The tested routes are the relay's own.
+- **Sub-threads the reviewer spawns** follow their parent's sandbox [tested at triage, read from session files]; nothing separate was built.
+- **One pair of Codex versions.** If a later Codex stops honouring the request, the relay refuses the conversation and doesn't queue into it; it can't make it read-only by another route.
 
 ## Rejected alternatives
 

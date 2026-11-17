@@ -109,6 +109,7 @@ class StopHookFolder(RelayCase):
             return f"thread-{len(self.started)}"
 
         for target, repl in (("ensure_daemon", lambda cfg: None), ("ensure_loaded", lambda cfg, t: None),
+                             ("set_read_only", lambda cfg, t: None),
                              ("start_thread", start_thread),
                              ("queue_message", lambda cfg, t, text, cid: self.queued.append(text) or "q1")):
             p = mock.patch.object(codexrpc, target, repl)

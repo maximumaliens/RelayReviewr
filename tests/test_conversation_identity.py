@@ -33,6 +33,7 @@ class ConversationIdentity(RelayCase):
             return f"thread-{len(self.started)}"
 
         for target, repl in (("ensure_daemon", lambda cfg: None), ("ensure_loaded", lambda cfg, t: None),
+                             ("set_read_only", lambda cfg, t: None),
                              ("start_thread", start_thread)):
             p = mock.patch.object(codexrpc, target, repl)
             p.start()
@@ -130,7 +131,7 @@ class Migration(RelayCase):
         a = self.project("A")
         self.old_db([("123", "t-old", str(a))])
         self.db = store.connect()
-        with mock.patch.object(codexrpc, "ensure_daemon"), mock.patch.object(codexrpc, "ensure_loaded"), \
+        with mock.patch.object(codexrpc, "ensure_daemon"), mock.patch.object(codexrpc, "set_read_only"), \
                 mock.patch.object(codexrpc, "start_thread") as start:
             self.assertEqual(intake.ensure_thread(self.db, store.load_config(), "123", str(a)), "t-old")
         start.assert_not_called()

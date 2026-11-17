@@ -44,6 +44,14 @@ def guarded_popen(allowed_under):
     return GuardedPopen
 
 
+def no_codex_daemon(*args, **kwargs):
+    """What a RelayCase test gets in place of the relay's requests to Codex and its daemon start, until it
+    installs a fake (FakeCodex.installed) or patches what it calls. It fails as an absent daemon does, which the
+    relay handles, and never opens the default Codex home's socket: that is the installed reviewer's."""
+    from ccrelay import codexrpc
+    raise codexrpc.CodexError("no Codex daemon in a unit test: install self.codex or patch the call it makes")
+
+
 def git(*args, cwd):
     subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
                    cwd=cwd, check=True, capture_output=True)
@@ -73,28 +81,106 @@ class StubServer:
 
 
 class FakeCodex:
-    """Stands in for the Codex daemon at the relay's client (codexrpc). Like Codex, it runs one turn per
-    conversation: a message queued while a turn is running waits in that conversation's queue; otherwise it
-    starts a turn at once. `busy` holds the conversations with a turn running (a menu is only ever open inside
-    one). `fail` makes the daemon unreachable. `instructions` and `loaded` record each new conversation's
-    developer instructions and each conversation confirmed loaded."""
+    """Stands in for the Codex daemon at the relay's requests to it (codexrpc.call): each request is recorded in
+    `calls` with its parameters and answered in the shape Codex's protocol schema gives it, so the relay's own
+    client code runs. Like Codex, it runs one turn per conversation: a message queued while a turn is running
+    waits in that conversation's queue; otherwise it starts a turn at once. `busy` holds the conversations with
+    a turn running (a menu is only ever open inside one). `fail` makes the daemon unreachable. `instructions`
+    records each new conversation's developer instructions.
+
+    Sandbox, as the development Codex daemon behaved in #13's probes (DESIGN.md, *Read-only reviewer*):
+    `sandbox` is what each loaded conversation runs under, `recorded` what its session file holds. The sandbox
+    a start names is live but not recorded, and a new conversation has no session file until it is named. A
+    settings update records its sandbox. A resume that names a sandbox records it only when it changes what is
+    live or loads the conversation. A resume that names none keeps what is live, or loads the conversation with
+    what is recorded, else with the trusted-project default, workspace-write. `restart()` unloads everything.
+    Set `resume_sandbox` to answer every resume with that sandbox, whatever was asked."""
+
+    READ_ONLY = {"type": "readOnly", "networkAccess": False}
+    WORKSPACE_WRITE = {"type": "workspaceWrite", "writableRoots": [], "networkAccess": False,
+                       "excludeTmpdirEnvVar": False, "excludeSlashTmp": False}
+    SANDBOXES = {"read-only": READ_ONLY, "workspace-write": WORKSPACE_WRITE}
 
     def __init__(self, db):
         self.db = db
         self.busy, self.queues, self.texts, self.fail = set(), {}, [], None
-        self.instructions, self.loaded = [], []
+        self.instructions, self.calls = [], []
+        self.started, self.unnamed, self.unloaded = [], set(), set()
+        self.sandbox, self.recorded, self.resume_sandbox = {}, {}, None
 
-    def start_thread(self, cfg, cwd, instructions, name):
-        self.instructions.append(instructions)
-        return "thread-1" if not self.db.execute("SELECT 1 FROM threads").fetchone() else f"thread-{name}-{cwd}"
+    def restart(self):
+        """The daemon restarts: nothing is loaded, and only what was recorded survives."""
+        self.unloaded |= set(self.thread_loaded_list({})["data"])
+        self.sandbox.clear()
 
-    def queue_message(self, cfg, thread_id, text, client_id):
-        self.texts.append(text)
+    def sent(self, method):
+        """The parameters of each `method` request the relay sent, in order."""
+        return [params for m, params in self.calls if m == method]
+
+    def call(self, cfg, method, params, timeout=30):
+        self.calls.append((method, params))
+        return getattr(self, method.replace("/", "_"))(params)
+
+    def thread_start(self, params):
+        self.instructions.append(params["developerInstructions"])
+        seeded = self.db.execute("SELECT 1 FROM threads").fetchone()
+        thread_id = f"thread-{len(self.started) + 1}" if not seeded else f"thread-new-{len(self.started) + 1}"
+        self.started.append(thread_id)
+        self.unnamed.add(thread_id)
+        self.sandbox[thread_id] = self.SANDBOXES[params["sandbox"]] if params.get("sandbox") else self.WORKSPACE_WRITE
+        return {"thread": {"id": thread_id, "status": {"type": "idle"}}, "sandbox": self.sandbox[thread_id],
+                "approvalPolicy": params.get("approvalPolicy") or "on-request"}
+
+    def thread_name_set(self, params):
+        self.unnamed.discard(params["threadId"])
+        return {}
+
+    def thread_settings_update(self, params):
+        thread_id = params["threadId"]
+        if params.get("sandboxPolicy"):
+            self.sandbox[thread_id] = params["sandboxPolicy"]
+            if thread_id not in self.unnamed:  # no session file yet: nothing is recorded
+                self.recorded[thread_id] = params["sandboxPolicy"]
+        return {}
+
+    def thread_loaded_list(self, params):
+        known = set(self.started)
+        known |= {r[0] for r in self.db.execute("SELECT thread_id FROM threads UNION SELECT thread_id FROM handoffs")}
+        return {"data": sorted(t for t in known - self.unloaded if t), "nextCursor": None}
+
+    def thread_resume(self, params):
+        from ccrelay import codexrpc
+        thread_id = params["threadId"]
+        if thread_id in self.unnamed:
+            raise codexrpc.CodexError(f"thread/resume: no rollout found for thread id {thread_id}")
+        self.unloaded.discard(thread_id)
+        live = self.sandbox.get(thread_id)
+        asked = self.SANDBOXES[params["sandbox"]] if params.get("sandbox") else None
+        self.sandbox[thread_id] = asked or live or self.recorded.get(thread_id) or self.WORKSPACE_WRITE
+        if self.sandbox[thread_id] != live:  # it loaded the conversation or changed what is live
+            self.recorded[thread_id] = self.sandbox[thread_id]
+        return {"thread": {"id": thread_id, "status": self.status(thread_id)},
+                "sandbox": self.resume_sandbox or self.sandbox[thread_id],
+                "approvalPolicy": params.get("approvalPolicy") or "on-request"}
+
+    def thread_queue_add(self, params):
+        thread_id = params["threadId"]
+        self.texts.append(params["input"][0]["text"])
         item_id = f"item-{len(self.texts)}"  # like Codex: its own id, never the client message id
         if thread_id in self.busy:
             self.queues.setdefault(thread_id, []).append(item_id)
         self.busy.add(thread_id)
-        return item_id
+        return {"queuedSubmission": {"id": item_id, "clientUserMessageId": params["clientUserMessageId"],
+                                     "input": params["input"]}}
+
+    def thread_queue_list(self, params):
+        return {"data": [{"id": i} for i in self.queues.get(params["threadId"], [])], "nextCursor": None}
+
+    def thread_read(self, params):
+        return {"thread": {"id": params["threadId"], "status": self.status(params["threadId"])}}
+
+    def status(self, thread_id):
+        return {"type": "active", "activeFlags": []} if thread_id in self.busy else {"type": "idle"}
 
     def ensure_daemon(self, cfg):
         if self.fail:
@@ -104,11 +190,7 @@ class FakeCodex:
     def installed(self):
         from ccrelay import codexrpc
         with mock.patch.object(codexrpc, "ensure_daemon", self.ensure_daemon), \
-                mock.patch.object(codexrpc, "ensure_loaded", lambda cfg, t: self.loaded.append(t)), \
-                mock.patch.object(codexrpc, "start_thread", self.start_thread), \
-                mock.patch.object(codexrpc, "queue_message", self.queue_message), \
-                mock.patch.object(codexrpc, "queued_ids", lambda cfg, t: set(self.queues.get(t, []))), \
-                mock.patch.object(codexrpc, "thread_status", lambda cfg, t: "active" if t in self.busy else "idle"):
+                mock.patch.object(codexrpc, "call", self.call):
             yield
 
 
@@ -126,6 +208,11 @@ class RelayCase(unittest.TestCase):
         guard = mock.patch.object(subprocess, "Popen", guarded_popen(self.root))
         guard.start()
         self.addCleanup(guard.stop)
+        from ccrelay import codexrpc
+        for name in ("call", "ensure_daemon"):  # the relay's default Codex home is the installed reviewer's
+            guard = mock.patch.object(codexrpc, name, no_codex_daemon)
+            guard.start()
+            self.addCleanup(guard.stop)
         self.old_home = os.environ.get("RELAY_HOME")
         os.environ["RELAY_HOME"] = str(self.root / "state")
         self.db = store.connect()
@@ -190,12 +277,15 @@ class RelayCase(unittest.TestCase):
 
     def start_wait_hook(self, hid, claude_pid=None, pause_before_output=0):
         """Run the real waiting loop for hand-off `hid` in a child process; its stdout is what Claude receives.
-        `pause_before_output` holds it between claiming a draft and printing it, so a test can kill it mid-send."""
+        `pause_before_output` holds it between claiming a draft and printing it, so a test can kill it mid-send.
+        Its Codex home is an empty folder of the test's, so its no-draft check finds no daemon: the patches that
+        keep this process from a real daemon don't reach a child, and the default home is the installed one."""
         env = dict(os.environ, CLAUDE_PID=str(claude_pid or os.getpid()), PYTHONPATH=str(ROOT),
                    RELAY_TEST_PAUSE_BEFORE_OUTPUT=str(pause_before_output))
-        code = ("from ccrelay import claude_hooks, store; "
-                "import sys; sys.exit(claude_hooks.wait(store.connect(), store.load_config(), int(sys.argv[1])))")
-        p = subprocess.Popen([sys.executable, "-c", code, str(hid)], env=env,
+        code = ("from ccrelay import claude_hooks, store; import sys; "
+                "cfg = dict(store.load_config(), codex_home=sys.argv[2]); "
+                "sys.exit(claude_hooks.wait(store.connect(), cfg, int(sys.argv[1])))")
+        p = subprocess.Popen([sys.executable, "-c", code, str(hid), str(self.root / "no-codex-home")], env=env,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.children.append(p)
         return p

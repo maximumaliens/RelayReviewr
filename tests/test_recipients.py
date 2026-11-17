@@ -209,6 +209,8 @@ class NextHeaderNamesLastInstruction(Recipients):
                         "('1111111111', 'T-1', ?, 'implementer', 0)", (str(self.root / "Proj"),))
         payload = {"session_id": "1111111111", "transcript_path": "/t.jsonl", "last_assistant_message": "fixed it"}
         with mock.patch.object(codexrpc, "ensure_daemon"), mock.patch.object(codexrpc, "ensure_loaded"), \
+                mock.patch.object(codexrpc, "set_read_only"), \
+                mock.patch.object(codexrpc, "thread_status", lambda cfg, t: "idle"), \
                 mock.patch.object(codexrpc, "queue_message", lambda cfg, t, text, cid: queued.append(text)), \
                 mock.patch.object(claude_hooks, "wait", lambda db, cfg, hid: 0), \
                 mock.patch("sys.stdin", io.StringIO(json.dumps(payload))):
